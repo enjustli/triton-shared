@@ -1021,8 +1021,7 @@ private:
     SmallVector<OpFoldResult> offsets(rank, b.getIndexAttr(0));
     SmallVector<OpFoldResult> strides(rank, b.getIndexAttr(1));
 
-    auto dstType = tensor::ExtractSliceOp::inferResultType(sourceType, offsets,
-                                                           dims, strides);
+    auto dstType = tensor::ExtractSliceOp::inferResultType(sourceType, dims);
 
     return tensor::ExtractSliceOp::create(b, loc, dstType, source, offsets,
                                           dims, strides);
