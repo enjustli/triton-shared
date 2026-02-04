@@ -487,6 +487,115 @@ struct CollapseReduce : public OpRewritePattern<linalg::ReduceOp> {
   }
 };
 
+static SmallVector<ReassociationIndices>
+makeLinearReassociation(unsigned rank) {
+  SmallVector<ReassociationIndices> reassoc;
+  reassoc.emplace_back();
+  for (int64_t i = 0; i < (int64_t)rank; ++i)
+    reassoc.back().push_back(i);
+  return reassoc;
+}
+
+template <typename CollapseOp>
+Value makeCollapse(PatternRewriter &rewriter, Location loc, Value src,
+                   ShapedType srcTy) {
+  auto rank = srcTy.getRank();
+  auto reassoc = makeLinearReassociation(rank);
+
+  int64_t total = 1;
+  for (auto d : srcTy.getShape())
+    total *= d;
+
+  auto flatTy = srcTy.clone({total});
+  return rewriter.create<CollapseOp>(loc, flatTy, src,
+                                     ArrayRef<ReassociationIndices>(reassoc));
+}
+
+template <typename ExpandOp>
+Value makeExpand(PatternRewriter &rewriter, Location loc, Value src,
+                 ShapedType origTy) {
+  auto reassoc = makeLinearReassociation(origTy.getRank());
+  return rewriter.create<ExpandOp>(loc, origTy, src,
+                                   ArrayRef<ReassociationIndices>(reassoc));
+}
+
+struct FlattenGeneric final : OpRewritePattern<linalg::GenericOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(linalg::GenericOp op,
+                                PatternRewriter &rewriter) const override {
+    // 1. Only process purely parallel
+    if (!llvm::all_of(op.getIteratorTypesArray(), [](auto it) {
+          return it == utils::IteratorType::parallel;
+        }))
+      return failure();
+
+    // 2. indexing_maps must be identity
+    for (auto m : op.getIndexingMapsArray())
+      if (!m.isIdentity())
+        return failure();
+
+    // 3. only support one output
+    if (op.getNumDpsInits() != 1)
+      return failure();
+
+    auto out = op.getDpsInitOperand(0)->get();
+    auto outTy = dyn_cast<ShapedType>(out.getType());
+    if (!outTy || !outTy.hasStaticShape())
+      return failure();
+
+    auto loc = op.getLoc();
+    unsigned rank = outTy.getRank();
+    if (rank <= 1)
+      return failure(); // already 1-D
+
+    // 4. choose tensor / memref
+    bool isTensor = isa<TensorType>(outTy);
+
+    auto collapse = [&](Value v) -> Value {
+      auto ty = cast<ShapedType>(v.getType());
+      if (isTensor)
+        return makeCollapse<tensor::CollapseShapeOp>(rewriter, loc, v, ty);
+      else
+        return makeCollapse<memref::CollapseShapeOp>(rewriter, loc, v, ty);
+    };
+
+    auto expand = [&](Value v) -> Value {
+      if (isTensor)
+        return makeExpand<tensor::ExpandShapeOp>(rewriter, loc, v, outTy);
+      else
+        return makeExpand<memref::ExpandShapeOp>(rewriter, loc, v, outTy);
+    };
+
+    // 5. collapse all inputs/outputs
+    SmallVector<Value> newIns, newOuts;
+    for (auto in : op.getDpsInputs())
+      newIns.push_back(collapse(in));
+    for (auto out : op.getDpsInits())
+      newOuts.push_back(collapse(out));
+
+    // 6. new affine_map: (i) -> (i)
+    auto newMap = AffineMap::get(1, 0, rewriter.getAffineDimExpr(0));
+
+    SmallVector<AffineMap> newMaps(op.getNumDpsInputs() + op.getNumDpsInits(),
+                                   newMap);
+
+    // 7. create 1-D generic
+    auto newOp = rewriter.create<linalg::GenericOp>(
+        loc, newOuts[0].getType(), newIns, newOuts, newMaps,
+        ArrayRef({utils::IteratorType::parallel}));
+
+    // 8. inline region
+    rewriter.inlineRegionBefore(op.getRegion(), newOp.getRegion(),
+                                newOp.getRegion().begin());
+
+    // 9. expand to origin shape
+    auto expanded = expand(newOp.getResult(0));
+    rewriter.replaceOp(op, expanded);
+    return success();
+  }
+};
+
 class CollapseShapePasss : public CollapseShapeBase<CollapseShapePasss> {
 
 public:
@@ -498,7 +607,7 @@ public:
     auto moduleOp = getOperation();
     RewritePatternSet patterns(&getContext());
     patterns.add<CollapseFill, CollapseBroadCast, CollapseTranspose,
-                 CollapseReduce>(&getContext());
+                 CollapseReduce, FlattenGeneric>(&getContext());
     if (failed(applyPatternsGreedily(moduleOp, std::move(patterns)))) {
       signalPassFailure();
     }
