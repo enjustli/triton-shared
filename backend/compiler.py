@@ -69,7 +69,7 @@ def _ttir_to_ttsharedir(mod):
         subprocess_args += ["--triton-to-linalg-experimental"]
         if _get_vectorization_option():
             print("Building with linalg vectorize support...")
-            subprocess_args += ["--linalg-fuse-elementwise-ops", "--linalg-to-vector"]
+            subprocess_args += ["--linalg-fuse-elementwise-ops", "--collapse-shape", "--linalg-to-vector"]
             
         subprocess_args += ["--mlir-print-debuginfo", "-o", dst_path]
 
@@ -92,7 +92,6 @@ def _ttsharedir_to_llir(ttsharedir: str):
         mlir_opt_path = _get_llvm_bin_path("mlir-opt")
         # TritonShared-MLIR to LLVM-MLIR
         subprocess.check_call([mlir_opt_path, ttshared_path,
-            "--linalg-fuse-elementwise-ops",
             "--convert-linalg-to-affine-loops",
             # Note: eliminate-empty-tensors fails when there are multiple func.return ops
             # in a single kernel which are the results of early returns.
