@@ -483,6 +483,33 @@ private:
   bool flatten1DDepthwiseConv = false;
 };
 
+struct ScalarizeSingleElementTransferRead
+    : OpRewritePattern<vector::TransferReadOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(vector::TransferReadOp op,
+                                PatternRewriter &rewriter) const override {
+    auto vecTy = op.getVectorType();
+    if (!vecTy || vecTy.getNumElements() != 1)
+      return failure();
+
+    if (llvm::all_of(op->getUsers(), [](Operation *user) {
+          return isa<vector::ExtractOp>(user);
+        }))
+      return failure();
+
+    // Create a scalar extract.
+    Value scalar =
+        vector::ExtractOp::create(rewriter, op.getLoc(), op.getResult(),
+                                  vecTy.getRank() ? llvm::ArrayRef<int64_t>{0}
+                                                  : llvm::ArrayRef<int64_t>{});
+    Value newVec =
+        vector::FromElementsOp::create(rewriter, op.getLoc(), vecTy, scalar);
+    rewriter.replaceAllUsesExcept(op, newVec, scalar.getDefiningOp());
+    return success();
+  }
+};
+
 } // namespace
 
 void mlir::tts::computeTiling(ModuleOp moduleOp, uint vectorBits,
@@ -512,14 +539,21 @@ void mlir::tts::populateVectorizeConversionPatterns(RewritePatternSet &patterns,
   vector::populateVectorReductionToContractPatterns(patterns);
 
   vector::populateSinkVectorOpsPatterns(patterns);
-  // vector::populateDropInnerMostUnitDimsXferOpPatterns(patterns);
-  // vector::populateVectorTransferDropUnitDimsPatterns(patterns);
-  // vector::populateSinkVectorMemOpsPatterns(patterns);
-  // vector::populateFlattenVectorTransferPatterns(patterns);
+
+  vector::populateDropInnerMostUnitDimsXferOpPatterns(patterns);
+  vector::populateVectorTransferDropUnitDimsPatterns(patterns);
+  vector::populateDropUnitDimWithShapeCastPatterns(patterns);
+  vector::populateSinkVectorMemOpsPatterns(patterns);
+  vector::populateCastAwayVectorLeadingOneDimPatterns(patterns);
+  vector::populateFlattenVectorTransferPatterns(patterns);
+  vector::populateScalarVectorTransferLoweringPatterns(
+      patterns, /*benefit=*/1,
+      /*allowMultipleUses=*/true);
 
   patterns.add<linalg::LinalgCopyVTRForwardingPattern,
-               linalg::LinalgCopyVTWForwardingPattern>(ctx,
-                                                       /*benefit=*/2);
+               linalg::LinalgCopyVTWForwardingPattern,
+               ScalarizeSingleElementTransferRead>(ctx,
+                                                   /*benefit=*/2);
   vector::TransferReadOp::getCanonicalizationPatterns(patterns, ctx);
   vector::TransferWriteOp::getCanonicalizationPatterns(patterns, ctx);
   tensor::populateFoldTensorSubsetIntoVectorTransferPatterns(patterns);

@@ -507,16 +507,16 @@ Value makeCollapse(PatternRewriter &rewriter, Location loc, Value src,
     total *= d;
 
   auto flatTy = srcTy.clone({total});
-  return rewriter.create<CollapseOp>(loc, flatTy, src,
-                                     ArrayRef<ReassociationIndices>(reassoc));
+  return CollapseOp::create(rewriter, loc, flatTy, src,
+                            ArrayRef<ReassociationIndices>(reassoc));
 }
 
 template <typename ExpandOp>
 Value makeExpand(PatternRewriter &rewriter, Location loc, Value src,
                  ShapedType origTy) {
   auto reassoc = makeLinearReassociation(origTy.getRank());
-  return rewriter.create<ExpandOp>(loc, origTy, src,
-                                   ArrayRef<ReassociationIndices>(reassoc));
+  return ExpandOp::create(rewriter, loc, origTy, src,
+                          ArrayRef<ReassociationIndices>(reassoc));
 }
 
 struct FlattenGeneric final : OpRewritePattern<linalg::GenericOp> {
@@ -581,8 +581,8 @@ struct FlattenGeneric final : OpRewritePattern<linalg::GenericOp> {
                                    newMap);
 
     // 7. create 1-D generic
-    auto newOp = rewriter.create<linalg::GenericOp>(
-        loc, newOuts[0].getType(), newIns, newOuts, newMaps,
+    auto newOp = linalg::GenericOp::create(
+        rewriter, loc, newOuts[0].getType(), newIns, newOuts, newMaps,
         ArrayRef({utils::IteratorType::parallel}));
 
     // 8. inline region
