@@ -69,7 +69,7 @@ def _ttir_to_ttsharedir(mod):
         subprocess_args += ["--triton-to-linalg-experimental"]
         if _get_vectorization_option():
             print("Building with linalg vectorize support...")
-            subprocess_args += ["--linalg-fuse-elementwise-ops", "--collapse-shape", "--linalg-to-vector"]
+            subprocess_args += ["--linalg-fuse-elementwise-ops", "--linalg-fold-unit-extent-dims", "--collapse-shape", "--linalg-to-vector"]
             
         subprocess_args += ["--mlir-print-debuginfo", "-o", dst_path]
 
