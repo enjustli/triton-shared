@@ -196,12 +196,14 @@ void computeTilingHelper(linalg::LinalgOp op, uint vectorBits,
   if (loopRanges.empty())
     return;
   unsigned int maxBitwidth = 0;
-  for (Value v : op->getOperands()) {
-    auto bitwidth = getValueBitwidth(v);
-    if (bitwidth == 0)
-      return;
-    maxBitwidth = std::max(maxBitwidth, bitwidth);
-  }
+  op->walk([&](Operation *nestedOp) {
+    for (Value v : nestedOp->getOperands()) {
+      auto bitwidth = getValueBitwidth(v);
+      if (bitwidth == 0)
+        return;
+      maxBitwidth = std::max(maxBitwidth, bitwidth);
+    }
+  });
   int64_t adjustedVectorSize = vectorBits / maxBitwidth;
   // Determine tile sizes (in elements) for each loop.
   SmallVector<int64_t> tileSizes(loopRanges.size());
