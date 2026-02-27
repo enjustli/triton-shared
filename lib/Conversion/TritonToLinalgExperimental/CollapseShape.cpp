@@ -29,8 +29,6 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 
-#include "llvm/ADT/MapVector.h"
-
 #define DEBUG_TYPE "collapse-shape"
 
 using namespace mlir;
@@ -494,17 +492,22 @@ struct FlattenGeneric final : OpRewritePattern<linalg::GenericOp> {
 
   bool canExtendGroup(int64_t prefix, int64_t newDim,
                       ArrayRef<AffineMap> maps) const {
-    bool used = false;
     SmallVector<bool> preFixFlag(maps.size(), false);
     SmallVector<bool> newDimFlag(maps.size(), false);
+
     // check newDim in all maps and tensors
     for (unsigned i = 0; i < maps.size(); ++i) {
       auto map = maps[i];
-      for (unsigned r = 0; r < map.getNumResults(); ++r) {
-        auto expr = cast<AffineDimExpr>(map.getResult(r));
+
+      for (auto expr : map.getResults()) {
+        if (isa<AffineConstantExpr>(expr)) {
+          continue;
+        }
+        unsigned pos = cast<AffineDimExpr>(expr).getPosition();
+
         // 只关心：这个 result 是否使用 newDim
-        if (expr.getPosition() != newDim) {
-          if (expr.getPosition() == prefix)
+        if (pos != newDim) {
+          if (pos == prefix)
             preFixFlag[i] = true;
           continue;
         }
@@ -539,7 +542,7 @@ struct FlattenGeneric final : OpRewritePattern<linalg::GenericOp> {
       ++i;
 
       while (i < n && its[i] == utils::IteratorType::parallel) {
-        if (!canExtendGroup(group.back(), i, maps))
+        if (!canExtendGroup(group.size() ? group.back() : -1, i, maps))
           break;
         group.push_back(i);
         ++i;
@@ -673,14 +676,17 @@ struct FlattenGeneric final : OpRewritePattern<linalg::GenericOp> {
         oldToNew[oldPos] = newPos;
 
     int pos = -1;
-    for (AffineExpr expr : oldMap.getResults()) {
-      auto d = cast<AffineDimExpr>(expr);
-      unsigned oldPos = d.getPosition();
+    for (auto it : llvm::enumerate(oldMap.getResults())) {
+      auto expr = it.value();
+      unsigned oldPos = isa<AffineConstantExpr>(expr)
+                            ? it.index()
+                            : cast<AffineDimExpr>(expr).getPosition();
       unsigned newPos = oldToNew.lookup(oldPos);
       if (newPos == pos)
         continue;
       pos = newPos;
-      newResults.push_back(getAffineDimExpr(newPos, ctx));
+      newResults.push_back(
+          isa<AffineConstantExpr>(expr) ? expr : getAffineDimExpr(newPos, ctx));
     }
     assert(newResults.size() <= reassoc.size() &&
            "pure remap must produce one result per reassoc group");
@@ -692,8 +698,13 @@ struct FlattenGeneric final : OpRewritePattern<linalg::GenericOp> {
     int64_t pos = -1;
     for (auto expr : map.getResults()) {
       auto d = dyn_cast<AffineDimExpr>(expr);
-      if (!d)
+      if (!d) {
+        if (auto c = dyn_cast<AffineConstantExpr>(expr)) {
+          if (c.getValue() == 0)
+            continue;
+        }
         return false;
+      }
       // bypass reshape,transpose may change the order of dim, but we only care
       // about the relative order of parallel dims, so we allow non-parallel dim
       // in between, but not allow parallel dim out of order
@@ -738,6 +749,9 @@ struct FlattenGeneric final : OpRewritePattern<linalg::GenericOp> {
           for (auto it : llvm::enumerate(map.getResults())) {
             if (auto dim = dyn_cast<AffineDimExpr>(it.value()))
               if (dim.getPosition() == d)
+                g.push_back(it.index());
+            if (isa<AffineConstantExpr>(it.value()))
+              if (it.index() == d)
                 g.push_back(it.index());
           }
         }
