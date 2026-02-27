@@ -499,10 +499,9 @@ struct ScalarizeSingleElementTransferRead
       return failure();
 
     // Create a scalar extract.
-    Value scalar =
-        vector::ExtractOp::create(rewriter, op.getLoc(), op.getResult(),
-                                  vecTy.getRank() ? llvm::ArrayRef<int64_t>{0}
-                                                  : llvm::ArrayRef<int64_t>{});
+    SmallVector<int64_t, 8> scalarIndices(vecTy.getRank(), 0);
+    Value scalar = vector::ExtractOp::create(rewriter, op.getLoc(),
+                                             op.getResult(), scalarIndices);
     Value newVec =
         vector::FromElementsOp::create(rewriter, op.getLoc(), vecTy, scalar);
     rewriter.replaceAllUsesExcept(op, newVec, scalar.getDefiningOp());
@@ -546,6 +545,8 @@ void mlir::tts::populateVectorizeConversionPatterns(RewritePatternSet &patterns,
   vector::populateSinkVectorMemOpsPatterns(patterns);
   vector::populateCastAwayVectorLeadingOneDimPatterns(patterns);
   vector::populateFlattenVectorTransferPatterns(patterns);
+  vector::populateVectorMaskLoweringPatternsForSideEffectingOps(patterns);
+  vector::MaskOp::getCanonicalizationPatterns(patterns, ctx);
   vector::populateScalarVectorTransferLoweringPatterns(
       patterns, /*benefit=*/1,
       /*allowMultipleUses=*/true);

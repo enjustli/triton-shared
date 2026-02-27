@@ -492,20 +492,16 @@ struct CollapseReduce : public OpRewritePattern<linalg::ReduceOp> {
 struct FlattenGeneric final : OpRewritePattern<linalg::GenericOp> {
   using OpRewritePattern::OpRewritePattern;
 
-  bool canExtendGroup(int64_t prefix, int64_t newDim, ArrayRef<AffineMap> maps,
-                      ArrayRef<ShapedType> tensors) const {
-    int64_t expected = -1;
+  bool canExtendGroup(int64_t prefix, int64_t newDim,
+                      ArrayRef<AffineMap> maps) const {
     bool used = false;
     SmallVector<bool> preFixFlag(maps.size(), false);
     SmallVector<bool> newDimFlag(maps.size(), false);
     // check newDim in all maps and tensors
     for (unsigned i = 0; i < maps.size(); ++i) {
       auto map = maps[i];
-      auto type = tensors[i];
-
       for (unsigned r = 0; r < map.getNumResults(); ++r) {
         auto expr = cast<AffineDimExpr>(map.getResult(r));
-
         // 只关心：这个 result 是否使用 newDim
         if (expr.getPosition() != newDim) {
           if (expr.getPosition() == prefix)
@@ -515,16 +511,6 @@ struct FlattenGeneric final : OpRewritePattern<linalg::GenericOp> {
         if (newDimFlag[i])
           return false;
         newDimFlag[i] = true;
-        int64_t sz = type.getDimSize(r);
-        if (sz < 0)
-          return false;
-
-        if (!used) {
-          expected = sz;
-          used = true;
-        } else if (sz != expected) {
-          return false;
-        }
       }
     }
     if (prefix >= 0 && preFixFlag != newDimFlag)
@@ -535,8 +521,7 @@ struct FlattenGeneric final : OpRewritePattern<linalg::GenericOp> {
   // find continuous parallel axis，generate reassociation
   std::pair<SmallVector<ReassociationIndices>, SmallVector<utils::IteratorType>>
   computeParallelReassociation(ArrayRef<utils::IteratorType> its,
-                               ArrayRef<AffineMap> maps,
-                               ArrayRef<ShapedType> tensors) const {
+                               ArrayRef<AffineMap> maps) const {
     SmallVector<ReassociationIndices> result;
     SmallVector<utils::IteratorType> newIts;
 
@@ -554,7 +539,7 @@ struct FlattenGeneric final : OpRewritePattern<linalg::GenericOp> {
       ++i;
 
       while (i < n && its[i] == utils::IteratorType::parallel) {
-        if (!canExtendGroup(group.size() ? group.back() : -1, i, maps, tensors))
+        if (!canExtendGroup(group.back(), i, maps))
           break;
         group.push_back(i);
         ++i;
@@ -722,12 +707,10 @@ struct FlattenGeneric final : OpRewritePattern<linalg::GenericOp> {
   LogicalResult matchAndRewrite(linalg::GenericOp op,
                                 PatternRewriter &rewriter) const override {
     // only support static shape for now
-    SmallVector<ShapedType> operandTypes;
     for (auto v : op.getOperands()) {
       auto ty = dyn_cast<ShapedType>(v.getType());
       if (!ty || !ty.hasStaticShape())
         return failure();
-      operandTypes.push_back(ty);
     }
 
     // only support dim projection for now
@@ -737,7 +720,7 @@ struct FlattenGeneric final : OpRewritePattern<linalg::GenericOp> {
     }
 
     auto [reassoc, newIts] = computeParallelReassociation(
-        op.getIteratorTypesArray(), op.getIndexingMapsArray(), operandTypes);
+        op.getIteratorTypesArray(), op.getIndexingMapsArray());
     bool hasCollapse =
         llvm::any_of(reassoc, [](auto &g) { return g.size() > 1; });
     if (!hasCollapse)
@@ -838,6 +821,7 @@ struct FlattenGeneric final : OpRewritePattern<linalg::GenericOp> {
     return success();
   }
 };
+
 class CollapseShapePasss : public CollapseShapeBase<CollapseShapePasss> {
 
 public:
@@ -850,9 +834,7 @@ public:
     RewritePatternSet patterns(&getContext());
     patterns.add<CollapseFill, CollapseBroadCast, CollapseTranspose,
                  CollapseReduce, FlattenGeneric>(&getContext());
-    if (failed(applyPatternsGreedily(moduleOp, std::move(patterns)))) {
-      signalPassFailure();
-    }
+    (void)(applyPatternsGreedily(moduleOp, std::move(patterns)));
   }
 };
 
