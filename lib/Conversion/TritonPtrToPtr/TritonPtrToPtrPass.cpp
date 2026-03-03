@@ -24,7 +24,7 @@
 #include "mlir/Transforms/Passes.h"
 #include "triton-shared/Analysis/OpFoldResultUtils.h"
 #include "triton-shared/AnalysisStructured/PtrAnalysis.h"
-#include "triton-shared/Conversion/TritonPtrToMemref/TritonPtrToMemref.h"
+#include "triton-shared/Conversion/TritonPtrToPtr/TritonPtrToPtr.h"
 #include "triton-shared/Dialect/TritonStructured/IR/TritonStructuredDialect.h"
 
 #include "triton/Dialect/Triton/IR/Dialect.h"
@@ -32,24 +32,24 @@
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "triton/Dialect/Triton/IR/Types.h"
 
-#define DEBUG_TYPE "triton-ptr-to-memref"
+#define DEBUG_TYPE "triton-ptr-to-ptr"
 
 using namespace mlir;
 using namespace triton;
 
-#define GEN_PASS_DEF_TRITONPTRTOMEMREF
-#include "triton-shared/Conversion/TritonPtrToMemref/Passes.h.inc"
+#define GEN_PASS_DEF_TRITONPTRTOPTR
+#include "triton-shared/Conversion/TritonPtrToPtr/Passes.h.inc"
 
 namespace {
 
 class TritonFunctionSignatureConverter : public TypeConverter {
 public:
-  TritonFunctionSignatureConverter() {
+  TritonFunctionSignatureConverter(MLIRContext *context) {
     // The order of type conversion is important: later ones are tried earlier.
     addConversion([](Type type) { return type; });
-    addConversion([](triton::PointerType ptrType) {
-      return UnrankedMemRefType::get(ptrType.getPointeeType(),
-                                     /*memorySpace=*/0);
+    addConversion([context](triton::PointerType ptrType) {
+      return ptr::PtrType::get(context,
+                               tptr::DefaultMemorySpaceAttr::get(context));
     });
     addConversion([](RankedTensorType tensorType) -> std::optional<Type> {
       if (auto ptrType =
@@ -69,15 +69,14 @@ public:
   }
 };
 
-class TritonPtrToMemrefPass
-    : public ::impl::TritonPtrToMemrefBase<TritonPtrToMemrefPass> {
+class TritonPtrToPtrPass : public TritonPtrToPtrBase<TritonPtrToPtrPass> {
 
 public:
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry
-        .insert<arith::ArithDialect, math::MathDialect, affine::AffineDialect,
-                scf::SCFDialect, tensor::TensorDialect, triton::TritonDialect,
-                tts::TritonStructuredDialect>();
+    registry.insert<
+        arith::ArithDialect, math::MathDialect, affine::AffineDialect,
+        scf::SCFDialect, tensor::TensorDialect, triton::TritonDialect,
+        tts::TritonStructuredDialect, ptr::PtrDialect, tptr::TPtrDialect>();
   }
 
   void runOnOperation() override {
@@ -85,7 +84,7 @@ public:
 
     RewritePatternSet patterns(&getContext());
     ConversionTarget target(getContext());
-    TritonFunctionSignatureConverter typeConverter;
+    TritonFunctionSignatureConverter typeConverter(&getContext());
 
     // Update function signature and call ops to use memrefs
     target.addDynamicallyLegalOp<func::FuncOp, triton::FuncOp>([&](auto op) {
@@ -118,6 +117,6 @@ public:
 };
 } // namespace
 
-std::unique_ptr<OperationPass<ModuleOp>> triton::createTritonPtrToMemrefPass() {
-  return std::make_unique<TritonPtrToMemrefPass>();
+std::unique_ptr<OperationPass<ModuleOp>> triton::createTritonPtrToPtrPass() {
+  return std::make_unique<TritonPtrToPtrPass>();
 }

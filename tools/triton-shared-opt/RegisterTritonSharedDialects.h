@@ -29,7 +29,7 @@
 
 #include "triton-shared/Conversion/StructuredToMemref/Passes.h"
 #include "triton-shared/Conversion/TritonArithToLinalg/Passes.h"
-#include "triton-shared/Conversion/TritonPtrToMemref/Passes.h"
+#include "triton-shared/Conversion/TritonPtrToPtr/Passes.h"
 #include "triton-shared/Conversion/TritonToLinalgExperimental/Passes.h"
 #include "triton-shared/Conversion/TritonToStructured/Passes.h"
 #include "triton-shared/Conversion/TritonToUnstructured/Passes.h"
@@ -47,7 +47,7 @@ inline void registerTritonSharedDialects(mlir::DialectRegistry &registry) {
   mlir::triton::registerTritonPasses();
   mlir::triton::registerTritonToLinalgExperimentalPasses();
   mlir::triton::registerTritonToStructuredPass();
-  mlir::triton::registerTritonPtrToMemref();
+  mlir::triton::registerTritonPtrToPtr();
   mlir::triton::registerUnstructuredToMemref();
   mlir::triton::registerTritonToUnstructuredPasses();
   mlir::triton::registerTritonArithToLinalgPasses();

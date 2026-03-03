@@ -1,4 +1,4 @@
-// RUN: triton-shared-opt --triton-arith-to-linalg --triton-ptr-to-memref %s | FileCheck %s
+// RUN: triton-shared-opt --triton-arith-to-linalg --triton-ptr-to-ptr %s | FileCheck %s
 
 module {
   tt.func @_sum_combine__fp32(%arg0: !tt.ptr<f32>) -> f32{

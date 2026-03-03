@@ -1,4 +1,4 @@
-// RUN: triton-shared-opt --triton-ptr-to-memref %s | FileCheck %s
+// RUN: triton-shared-opt --triton-ptr-to-ptr %s | FileCheck %s
 
 module {
   tt.func public @add_kernel_01234(%arg0: !tt.ptr<f32>, %arg1: !tt.ptr<f32>, %arg2: !tt.ptr<f32>, %arg3: i32) {

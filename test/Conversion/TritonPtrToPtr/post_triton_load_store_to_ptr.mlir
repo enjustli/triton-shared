@@ -1,4 +1,4 @@
-// RUN: triton-shared-opt --triton-ptr-to-memref %s | FileCheck %s
+// RUN: triton-shared-opt --triton-ptr-to-ptr %s | FileCheck %s
 
 #map = affine_map<(d0) -> (d0)>
 module {
