@@ -11,6 +11,7 @@ The basic intended architecture looks like this:
 The middle-layer uses MLIR's Linalg and Tensor Dialects for operations on Triton block values. Operations on Triton pointers use the Memref Dialect.
 
 ## Motivation
+
 [This talk at the 2023 Triton Developer Conferene](https://www.youtube.com/watch?v=y2V3ucS1pfQ) gives some background on the project and its goals.
 
 ## Usage
@@ -22,7 +23,7 @@ To build this repo clone `triton-shared` to a folder called `triton_shared` (not
 
 You need to set the `TRITON_PLUGIN_DIRS` environment variable to the location of your `triton-shared` directory for `triton` to find it.
 
-```
+```bash
 export TRITON_PLUGIN_DIRS=$(pwd)/triton_shared
 
 git clone https://github.com/microsoft/triton-shared.git triton_shared
@@ -42,7 +43,7 @@ TRITON_BUILD_WITH_CLANG_LLD=true TRITON_BUILD_WITH_CCACHE=true python3 -m pip in
 
 To build with a virtualenv:
 
-```
+```bash
 python3 -m venv .venv --prompt triton
 source .venv/bin/activate
 
@@ -53,17 +54,21 @@ pip3 install -e . --no-build-isolation
 The resulting `triton-shared` binaries will be placed under `triton/build/{current_cmake_version}/third_party/triton_shared`
 
 ### 1. Stand-Alone
+
 The middle layer can be used as a stand-alone component to convert Triton dialect to the middle layer dialects. This is intended for testing and validation purposes, but could potentially be used before sending the IR to another MLIR complier.
 
 Stand-alone example:
-```
+
+```bash
 triton-shared-opt --triton-to-linalg %file
 ```
 
 ### 2. Backend Component
+
 The intended use of the Triton middle layer is to be used as a component in a Triton back-end. This can be accomplished by adding the cmake targets it produces and its headers files to that back-end. An example back-end will be published at a later date.
 
 ### 3. Reference CPU backend
+
 We also include an experimental reference CPU backend that leverages all existing `mlir` passes. After building, the CPU backend can be used by setting `triton`'s active driver:
 
 ```python
@@ -147,7 +152,7 @@ Important details to note:
 
 + `tt.store` lowers to a combination of `memref.reinterpret_cast` and either `affine.store` or `memref.tensor_store`:
 
-```
+```mlir
 %reinterpret_cast = memref.reinterpret_cast %arg2 to offset: [...] memref<*xf32> to memref<1024xf32>
 %extracted_slice = tensor.extract_slice %15[0] [%21] [1] : tensor<1024xf32> to tensor<?xf32>
 %subview = memref.subview %reinterpret_cast[0] [%21] [1] : memref<1024xf32> to memref<?xf32>
@@ -169,12 +174,14 @@ The prototype was tested on the following triton kernel examples:
 5. fused attention
 
 The Python tests are setup to run with Pytest and you will need to set the following environment variables to run them:
-```
+
+```bash
 export LLVM_BINARY_DIR=<path-to-your-llvm-binaries>
 export TRITON_SHARED_OPT_PATH=$TRITON_PLUGIN_DIRS/triton/build/<your-cmake-directory>/third_party/triton_shared/tools/triton-shared-opt/triton-shared-opt
 
 pytest <path-to-triton-shared>/python/examples
 ```
+
 In addition to testing on the tutorial kernels, there are many lit tests covering various scenarios.
 
 ## Intermediate Representation (IR) Dumps
@@ -208,13 +215,39 @@ ll.ir  ll.mlir  tt.mlir  ttshared.mlir
 ```
 
 ## Debugging Triton Programs
-Triton-shared includes a build option that enables LLVM-sanitizers - AddressSanitizer (ASan) and ThreadSanitizer (TSan) - to help detect memory safety and concurrency issues in Triton programs. These sanitizers dynamically analyze the program during execution, identifying bugs such as buffer overflows and data races respectively. For more details and setup instructions, refer [here](triton-san/README.md).
+
+Triton-shared includes a build option that enables LLVM-sanitizers - AddressSanitizer (ASan) and ThreadSanitizer (TSan) - to help detect memory safety and concurrency issues in Triton programs. These sanitizers dynamically analyze the program during execution, identifying bugs such as buffer overflows and data races respectively. For more details and setup instructions, refer to the [Debugging with Sanitizers guide](triton-san/README.md).
+
+## MLIR / Triton LSP Setup (VS Code)
+
+To enable MLIR/Triton language support in VS Code:
+
+ 1. Install the official MLIR extension: 👉 <https://marketplace.visualstudio.com/items?itemName=llvm-vs-code-extensions.vscode-mlir>
+ 2. Open your VS Code settings.json and add:
+
+    ```json
+    {
+      //  Replace ${path-to-lsp} with the actual path to your built triton-shared-lsp-server binary.
+      "mlir.server.path": "${path-to-lsp}/triton-shared-lsp-server"
+    }
+    ```
+
+ 3. Restart VS Code.
+
+After setup, you should get:
+
++ Syntax highlighting
++ Hover information
++ Go-to-definition
++ Diagnostics
+
+for `.mlir` files.
 
 ## Contributing
 
 This project welcomes contributions and suggestions.  Most contributions require you to agree to a
 Contributor License Agreement (CLA) declaring that you have the right to, and actually do, grant us
-the rights to use your contribution. For details, visit https://cla.opensource.microsoft.com.
+the rights to use your contribution. For details, visit <https://cla.opensource.microsoft.com>.
 
 When you submit a pull request, a CLA bot will automatically determine whether you need to provide
 a CLA and decorate the PR appropriately (e.g., status check, comment). Simply follow the instructions
