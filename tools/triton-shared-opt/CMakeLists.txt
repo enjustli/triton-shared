@@ -20,3 +20,27 @@ target_link_libraries(triton-shared-opt PRIVATE
 )
 
 mlir_check_all_link_libraries(triton-shared-opt)
+
+add_llvm_executable(triton-shared-lsp triton-shared-lsp.cpp PARTIAL_SOURCES_INTENDED)
+
+llvm_update_compile_flags(triton-shared-lsp)
+target_link_libraries(triton-shared-lsp PRIVATE
+  TritonTransforms
+  TritonSharedAnalysis
+  ${dialect_libs}
+  ${conversion_libs}
+  ${triton_libs}
+  # tests
+  TritonTestAnalysis
+  TritonTestDialect
+  TritonAMDGPUTestAnalysis
+  TritonTestProton
+  # MLIR core
+  MLIRLspServerLib
+  MLIRPass
+  MLIRRegisterAllDialects
+  MLIRRegisterAllPasses
+  MLIRTransforms
+)
+
+mlir_check_all_link_libraries(triton-shared-lsp)
