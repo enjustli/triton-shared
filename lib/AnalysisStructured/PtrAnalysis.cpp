@@ -39,10 +39,64 @@
 
 using namespace mlir;
 
+inline bool isZeroScalar(Value v) {
+  auto cst = v.getDefiningOp<arith::ConstantOp>();
+  if (!cst)
+    return false;
+
+  Attribute attr = cst.getValue();
+
+  auto intAttr = dyn_cast<IntegerAttr>(attr);
+  if (!intAttr)
+    return false;
+
+  return intAttr.getValue().isZero();
+}
+
+OpFoldResult analysisUpper(OpFoldResult upperBound, mlir::Value mask,
+                           bool &flag) {
+  auto cmpi = mask.getDefiningOp<arith::CmpIOp>();
+  if (!cmpi || cmpi.getPredicate() != arith::CmpIPredicate::ne) {
+    return upperBound;
+  }
+  Value load;
+  auto constZero = cmpi.getRhs().getDefiningOp<arith::ConstantOp>();
+  if (constZero) {
+    load = cmpi.getLhs();
+  } else {
+    constZero = cmpi.getLhs().getDefiningOp<arith::ConstantOp>();
+    load = cmpi.getRhs();
+  }
+  if (!constZero) {
+    return upperBound;
+  }
+  auto dense = dyn_cast<DenseElementsAttr>(constZero.getValue());
+  if (!dense || !dense.isSplat() || !dense.getSplatValue<APInt>().isZero()) {
+    return upperBound;
+  }
+  if (auto extsi = load.getDefiningOp<arith::ExtSIOp>()) {
+    load = extsi.getIn();
+  }
+  auto ttsLoad = load.getDefiningOp<tts::LoadOp>();
+  if (!ttsLoad) {
+    return upperBound;
+  }
+  if (!isZeroScalar(ttsLoad.getOther())) {
+    return upperBound;
+  }
+  auto mixedDims = ttsLoad.getMixedMaskDims();
+  if (mixedDims.size() != 1) {
+    return upperBound;
+  }
+  flag = true;
+  return mixedDims[0];
+}
+
 // Try to apply unstructured mask on the ptr.
 static Value applyUnstructuredMask(Operation *op, Value ptr,
                                    triton::MaskState &mstate, Location loc,
-                                   OpBuilder builder) {
+                                   OpBuilder builder,
+                                   bool enableMakeGatherScatterTensorPtr) {
   SmallVector<std::pair<unsigned, Value>> masks = mstate.getUnstructuredMasks();
   if (masks.empty()) {
     return ptr;
@@ -52,8 +106,14 @@ static Value applyUnstructuredMask(Operation *op, Value ptr,
         "MaskAnalysis failed for more than one unstructured masks"));
     return nullptr;
   }
+  if (!enableMakeGatherScatterTensorPtr) {
+    LLVM_DEBUG(op->emitRemark(
+        "MaskAnalysis failed since enableMakeGatherScatterTensorPtr is false"));
+    return nullptr;
+  }
 
   auto [dim, unstructuredMask] = masks[0];
+  auto flag = false;
   if (auto gatherScatterPtr =
           ptr.getDefiningOp<tts::MakeGatherScatterTensorPtrOp>()) {
     if (dim != gatherScatterPtr.getGatherScatterDim()) {
@@ -112,11 +172,15 @@ static Value applyUnstructuredMask(Operation *op, Value ptr,
               unstructuredMask, dim, structuredPtr.getSizes(),
               structuredPtr.getMixedStrides(), structuredPtr.getMixedOffsets())
               .getResult();
+    mstate.dims[dim] = analysisUpper(OpFoldResult(builder.getI32IntegerAttr(0)),
+                                     unstructuredMask, flag);
   } else {
     return nullptr;
   }
   // Clear the mask size for gather/scatter dim.
-  mstate.dims[dim] = OpFoldResult(builder.getI32IntegerAttr(0));
+  if (!flag) {
+    mstate.dims[dim] = OpFoldResult(builder.getI32IntegerAttr(0));
+  }
   return ptr;
 }
 
@@ -1696,7 +1760,8 @@ LogicalResult PtrAnalysis::rewriteLoadOp(triton::LoadOp op,
       LLVM_DEBUG(op->emitRemark("MaskAnalysis failed"));
       return failure();
     }
-    ptr = applyUnstructuredMask(op, ptr, mstate, loc, builder);
+    ptr = applyUnstructuredMask(op, ptr, mstate, loc, builder,
+                                enableMakeGatherScatterTensorPtr);
     if (!ptr) {
       return failure();
     }
@@ -1837,7 +1902,8 @@ LogicalResult PtrAnalysis::rewriteStoreOp(triton::StoreOp op,
       LLVM_DEBUG(op->emitRemark("MaskAnalysis failed"));
       return failure();
     }
-    ptr = applyUnstructuredMask(op, ptr, mstate, loc, builder);
+    ptr = applyUnstructuredMask(op, ptr, mstate, loc, builder,
+                                enableMakeGatherScatterTensorPtr);
     if (!ptr) {
       return failure();
     }

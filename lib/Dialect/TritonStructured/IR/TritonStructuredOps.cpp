@@ -266,11 +266,11 @@ LogicalResult MakeGatherScatterTensorPtrOp::verify() {
               loadOp.getMixedMaskDims()[getGatherScatterDim()];
           auto intAttr =
               dyn_cast_if_present<IntegerAttr>(dyn_cast<Attribute>(MaskedSize));
-          if (!intAttr || intAttr.getInt() != 0) {
-            return emitError("tts.load user of tts.make_gather_scatter_tptr "
-                             "with gather_scatter_mask must have "
-                             "mask size of 0 for gather_scatter_dim");
-          }
+          // if (!intAttr || intAttr.getInt() != 0) {
+          //   return emitError("tts.load user of tts.make_gather_scatter_tptr "
+          //                    "with gather_scatter_mask must have "
+          //                    "mask size of 0 for gather_scatter_dim");
+          // }
         } else {
           return emitError("tts.load user of tts.make_gather_scatter_tptr with "
                            "gather_scatter_mask must have "
@@ -282,11 +282,11 @@ LogicalResult MakeGatherScatterTensorPtrOp::verify() {
               storeOp.getMixedMaskDims()[getGatherScatterDim()];
           auto intAttr =
               dyn_cast_if_present<IntegerAttr>(dyn_cast<Attribute>(MaskedSize));
-          if (!intAttr || intAttr.getInt() != 0) {
-            return emitError("tts.store user of tts.make_gather_scatter_tptr "
-                             "with gather_scatter_mask must have "
-                             "mask size of 0 for gather_scatter_dim");
-          }
+          // if (!intAttr || intAttr.getInt() != 0) {
+          //   return emitError("tts.store user of tts.make_gather_scatter_tptr "
+          //                    "with gather_scatter_mask must have "
+          //                    "mask size of 0 for gather_scatter_dim");
+          // }
         } else {
           return emitError(
               "tts.store user of tts.make_gather_scatter_tptr with "

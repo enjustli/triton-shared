@@ -186,6 +186,42 @@ static Value rewriteGatherScatterPtrElement(
   return castOp.getResult();
 }
 
+static Value rewriteGatherScatterPtrElement(
+    llvm::SmallVector<mlir::OpFoldResult> sizes,
+    tts::MakeGatherScatterTensorPtrOp op, Value basePtr, Value gatherOffsetElt,
+    int gatherDim, ConversionPatternRewriter &rewriter) {
+
+  llvm::SmallVector<mlir::OpFoldResult> mixedStrides(sizes.size());
+  OpFoldResult accumulate = rewriter.getIndexAttr(1);
+  for (int i = sizes.size() - 1; i >= 0; i--) {
+    mixedStrides[i] = accumulate;
+    accumulate = mulOFRs(accumulate, sizes[i], op.getLoc(), rewriter);
+  }
+
+  SmallVector<int64_t> staticStrides;
+  SmallVector<Value> dynamicStrides;
+  dispatchIndexOpFoldResults(mixedStrides, dynamicStrides, staticStrides);
+
+  auto offsets = op.getMixedOffsets();
+  offsets[gatherDim] = gatherOffsetElt;
+  auto targetOffset = accumulateTargetOffset(op.getLoc(), offsets, mixedStrides,
+                                             gatherDim, rewriter);
+
+  auto staticTargetOffset = getIntAttr(targetOffset);
+  std::vector<int64_t> staticSizes;
+  for (auto v : sizes) {
+    staticSizes.push_back(getIntAttr(v).value_or(ShapedType::kDynamic));
+  }
+  auto resultType =
+      getResultMemrefType(op, staticTargetOffset.value_or(ShapedType::kDynamic),
+                          staticStrides, staticSizes);
+  auto castOp = memref::ReinterpretCastOp::create(
+      rewriter, op.getLoc(), resultType, basePtr, targetOffset, sizes,
+      mixedStrides);
+
+  return castOp.getResult();
+}
+
 // Fill load destination with other value for mask.
 static void fillWithValue(Location loc, Value alloc, Value other,
                           ArrayRef<int64_t> shape,
@@ -847,9 +883,138 @@ private:
     return success();
   }
 
+  LogicalResult rewriteGatherToCopy(tts::MakeGatherScatterTensorPtrOp ptr,
+                                    tts::LoadOp op, Value memRefPtr,
+                                    ConversionPatternRewriter &rewriter) const {
+    auto loc = op.getLoc();
+
+    Value gatherOffset = ptr.getGatherScatterOffset();
+    // Cast gatherOffset to index
+    auto offsetShapedType = cast<ShapedType>(gatherOffset.getType());
+    unsigned offsetSize = offsetShapedType.getShape()[0];
+    auto indexOffsetTy = RankedTensorType::get(offsetShapedType.getShape(),
+                                               rewriter.getIndexType());
+    gatherOffset =
+        arith::IndexCastOp::create(rewriter, loc, indexOffsetTy, gatherOffset)
+            .getResult();
+
+    int gatherDim = ptr.getGatherScatterDim();
+
+    auto offsets = ptr.getMixedOffsets();
+    auto strides = ptr.getMixedStrides();
+
+    std::vector<int64_t> staticSizes = ptr.getSizes();
+    SmallVector<Value> dynSizes; // sizes are always static
+    auto sizes = mlir::getMixedValues(staticSizes, dynSizes, rewriter);
+
+    // Create alloc to save the result.
+    auto resultType = dyn_cast<RankedTensorType>(op.getResult().getType());
+    auto allocType =
+        MemRefType::get(resultType.getShape(), resultType.getElementType());
+    auto alloc = memref::AllocOp::create(rewriter, loc, allocType);
+
+    auto allocStrides = mlir::getMixedValues(
+        allocType.getStridesAndOffset().first, dynSizes, rewriter);
+    // Fill load destination with other value
+    if (Value other = op.getOther()) {
+      fillWithValue(loc, alloc, other, resultType.getShape(),
+                    op.getMixedMaskDims(), op.getStaticMaskDims(), rewriter);
+    }
+
+    // Create loop to iterate every offset in gatherOffset.
+    auto zeroIndex = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    OpFoldResult MaskedSize = op.getMixedMaskDims()[ptr.getGatherScatterDim()];
+    auto oneIndex = arith::ConstantIndexOp::create(rewriter, loc, 1);
+    sizes[gatherDim] = MaskedSize;
+
+    // Load the offsetElt first.
+    auto gatherOffsetElt = tensor::ExtractOp::create(
+        rewriter, loc, gatherOffset, ValueRange{zeroIndex});
+
+    if (op.hasMask()) {
+      SmallVector<OpFoldResult> mixedDims = op.getMixedMaskDims();
+      mixedDims[gatherDim] = sizes[gatherDim];
+      sizes = mixedDims;
+    }
+
+    // reinterpret_cast to current row as memRefPtr[gatherOffsetElt].
+    Value srcPtr = rewriteGatherScatterPtrElement(sizes, ptr, memRefPtr,
+                                                  gatherOffsetElt.getResult(),
+                                                  gatherDim, rewriter);
+    unsigned rank = ptr.getSizes().size();
+    // The subview should not apply an additional stride to the source.
+    SmallVector<OpFoldResult> oneStrides(rank, OpFoldResult(oneIndex));
+    // subview from srcPtr for mask.
+    // With offsets[gatherDim] set to 0 since the offset already in
+    // reinterpret_cast. With sizes[gatherDim] set to 1 since we are load one
+    // row each time.
+    if (op.hasMask()) {
+      // maskOffsets should be all zero, since srcPtr already has the offsets.
+      SmallVector<OpFoldResult> maskOffsets(rank, OpFoldResult(zeroIndex));
+      // Use oneStrides for subview.
+      auto dstSubViewType = memref::SubViewOp::inferResultType(
+          cast<MemRefType>(srcPtr.getType()), maskOffsets, sizes, oneStrides);
+      srcPtr = memref::SubViewOp::create(rewriter, loc,
+                                         cast<MemRefType>(dstSubViewType),
+                                         srcPtr, maskOffsets, sizes, oneStrides)
+                   .getResult();
+    }
+
+    // alloc[inductionVar]
+    SmallVector<OpFoldResult> allocOffsets(rank, OpFoldResult(zeroIndex));
+    allocOffsets[gatherDim] = Value(zeroIndex);
+    auto dstAllocType = memref::SubViewOp::inferResultType(
+        allocType, allocOffsets, sizes, oneStrides);
+    auto dstSubview =
+        memref::SubViewOp::create(rewriter, loc, cast<MemRefType>(dstAllocType),
+                                  alloc, allocOffsets, sizes, oneStrides);
+    // Copy srcPtr to alloc[inductionVar].
+    memref::CopyOp::create(rewriter, loc, srcPtr, dstSubview);
+
+    // Create tensor from alloc and use it as the result to replace op.
+    Value tensor = bufferization::ToTensorOp::create(
+        rewriter, loc, op.getType(), alloc, true /* restrict */,
+        true /* writable */);
+
+    if (Value other = op.getOther()) {
+      if (Value unstructuredMask = ptr.getGatherScatterMask()) {
+        std::vector<int64_t> shape = resultType.getShape();
+        auto empty =
+            tensor::EmptyOp::create(rewriter, loc, shape, rewriter.getI1Type());
+        std::vector<int64_t> broadcastDims;
+        for (auto i = 0; i < shape.size(); ++i) {
+          if (i != gatherDim)
+            broadcastDims.push_back(i);
+        }
+        auto broadcastedMask =
+            linalg::BroadcastOp::create(rewriter, loc, unstructuredMask, empty,
+                                        broadcastDims)
+                .getResult()[0];
+        empty = tensor::EmptyOp::create(rewriter, loc, shape,
+                                        resultType.getElementType());
+        auto otherTensor =
+            linalg::FillOp::create(
+                rewriter, loc, {other},
+                {tensor::EmptyOp::create(rewriter, loc, shape,
+                                         resultType.getElementType())})
+                .getResult(0);
+        tensor =
+            linalg::SelectOp::create(
+                rewriter, loc, {broadcastedMask, tensor, otherTensor}, {empty})
+                .getResult(0);
+      }
+    }
+    rewriter.replaceOp(op, tensor);
+    return success();
+  }
+
   LogicalResult rewriteGather(tts::MakeGatherScatterTensorPtrOp ptr,
                               tts::LoadOp op, Value memRefPtr,
                               ConversionPatternRewriter &rewriter) const {
+    OpFoldResult MaskedSize = op.getMixedMaskDims()[ptr.getGatherScatterDim()];
+    if (!isa<Attribute>(MaskedSize)) {
+      return rewriteGatherToCopy(ptr, op, memRefPtr, rewriter);
+    }
     auto loc = op.getLoc();
 
     Value gatherOffset = ptr.getGatherScatterOffset();
@@ -1023,10 +1188,123 @@ private:
     return tensor::ExtractSliceOp::create(b, loc, dstType, source, offsets,
                                           dims, strides);
   }
+  LogicalResult
+  rewriteScatterToCopy(tts::MakeGatherScatterTensorPtrOp ptr, tts::StoreOp op,
+                       Value memRefPtr, Value stVal,
+                       ConversionPatternRewriter &rewriter) const {
+    auto loc = op.getLoc();
+
+    Value gatherOffset = ptr.getGatherScatterOffset();
+    // Cast gatherOffset to index.
+    auto offsetShapedType = cast<ShapedType>(gatherOffset.getType());
+    unsigned offsetSize = offsetShapedType.getShape()[0];
+    auto indexOffsetTy = RankedTensorType::get(offsetShapedType.getShape(),
+                                               rewriter.getIndexType());
+    gatherOffset =
+        arith::IndexCastOp::create(rewriter, loc, indexOffsetTy, gatherOffset)
+            .getResult();
+
+    int gatherDim = ptr.getGatherScatterDim();
+
+    auto offsets = ptr.getMixedOffsets();
+    auto strides = ptr.getMixedStrides();
+
+    std::vector<int64_t> staticSizes = ptr.getSizes();
+    SmallVector<Value> dynSizes; // sizes are always static
+    auto sizes = mlir::getMixedValues(staticSizes, dynSizes, rewriter);
+
+    // Create loop to iterate every offset in gatherOffset.
+    auto zeroIndex = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    OpFoldResult MaskedSize = op.getMixedMaskDims()[ptr.getGatherScatterDim()];
+    auto oneIndex = arith::ConstantIndexOp::create(rewriter, loc, 1);
+    sizes[gatherDim] = MaskedSize;
+
+    // Load the offsetElt first.
+    auto gatherOffsetElt = tensor::ExtractOp::create(
+        rewriter, loc, gatherOffset, ValueRange{zeroIndex});
+
+    // Create extract_slice stVal[zeroIndex].
+    unsigned rank = ptr.getSizes().size();
+    SmallVector<OpFoldResult> stValOffsets(rank, OpFoldResult(zeroIndex));
+    stValOffsets[gatherDim] = Value(zeroIndex);
+
+    // Use mixed mask dims as sizes with mixedDims[gatherDim] set to 1 when
+    // hasMask.
+    if (op.hasMask()) {
+      SmallVector<OpFoldResult> mixedDims = op.getMixedMaskDims();
+      mixedDims[gatherDim] = sizes[gatherDim];
+      sizes = mixedDims;
+    }
+    // The subview should not apply an additional stride to the source.
+    SmallVector<OpFoldResult> oneStrides(rank, OpFoldResult(oneIndex));
+
+    // reinterpret_cast to current row as memRefPtr[gatherOffsetElt].
+    Value dstPtr = rewriteGatherScatterPtrElement(sizes, ptr, memRefPtr,
+                                                  gatherOffsetElt.getResult(),
+                                                  gatherDim, rewriter);
+    // subview from dstPtr for mask.
+    // Set offsets[] to 0 since it gatherOffsetElt already in reinterpret_cast.
+    if (op.hasMask()) {
+      // maskOffsets should be all zero, since srcPtr already has the offsets.
+      SmallVector<OpFoldResult> maskOffsets(rank, OpFoldResult(zeroIndex));
+      auto dstType = memref::SubViewOp::inferResultType(
+          cast<MemRefType>(dstPtr.getType()), maskOffsets, sizes, oneStrides);
+
+      dstPtr =
+          memref::SubViewOp::create(rewriter, loc, cast<MemRefType>(dstType),
+                                    dstPtr, maskOffsets, sizes, oneStrides)
+              .getResult();
+    }
+    if (Value unstructuredMask = ptr.getGatherScatterMask()) {
+      auto resultType = dyn_cast<RankedTensorType>(stVal.getType());
+      auto allocType =
+          MemRefType::get(resultType.getShape(), resultType.getElementType());
+      auto alloc = memref::AllocOp::create(rewriter, loc, allocType);
+      auto allocSlice = memref::SubViewOp::create(
+          rewriter, loc, alloc,
+          /* offsets */
+          SmallVector<OpFoldResult>(rank, OpFoldResult(zeroIndex)), sizes,
+          oneStrides);
+      memref::CopyOp::create(rewriter, loc, dstPtr, allocSlice);
+      Value tensor = bufferization::ToTensorOp::create(
+          rewriter, loc, resultType, alloc, true /* restrict */,
+          true /* writable */);
+      auto empty = tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                           rewriter.getI1Type());
+      std::vector<int64_t> broadcastDims;
+      for (auto i = 0; i < resultType.getShape().size(); ++i) {
+        if (i != gatherDim)
+          broadcastDims.push_back(i);
+      }
+      auto broadcastedMask =
+          linalg::BroadcastOp::create(rewriter, loc, unstructuredMask, empty,
+                                      broadcastDims)
+              .getResult()[0];
+      empty = tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                      resultType.getElementType());
+      stVal = linalg::SelectOp::create(
+                  rewriter, loc, {broadcastedMask, stVal, tensor}, {empty})
+                  .getResult(0);
+    }
+    auto slice = tensor::ExtractSliceOp::create(
+        rewriter, loc, stVal, stValOffsets, sizes, oneStrides);
+    // store slice to dstPtr.
+    auto storeOp = bufferization::MaterializeInDestinationOp::create(
+        rewriter, loc, slice, dstPtr);
+    storeOp.setWritable(true);
+
+    rewriter.eraseOp(op);
+
+    return success();
+  }
 
   LogicalResult rewriteScatter(tts::MakeGatherScatterTensorPtrOp ptr,
                                tts::StoreOp op, Value memRefPtr, Value stVal,
                                ConversionPatternRewriter &rewriter) const {
+    OpFoldResult MaskedSize = op.getMixedMaskDims()[ptr.getGatherScatterDim()];
+    if (!isa<Attribute>(MaskedSize)) {
+      return rewriteScatterToCopy(ptr, op, memRefPtr, stVal, rewriter);
+    }
     auto loc = op.getLoc();
 
     Value gatherOffset = ptr.getGatherScatterOffset();
