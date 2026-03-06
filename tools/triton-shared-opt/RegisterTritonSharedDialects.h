@@ -26,7 +26,8 @@
 #include "triton/Dialect/TritonInstrument/Transforms/Passes.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonNvidiaGPU/Transforms/Passes.h"
-
+ 
+#include "triton-shared/Conversion/LinalgToVector/Passes.h"
 #include "triton-shared/Conversion/StructuredToMemref/Passes.h"
 #include "triton-shared/Conversion/TritonArithToLinalg/Passes.h"
 #include "triton-shared/Conversion/TritonPtrToMemref/Passes.h"
@@ -53,6 +54,9 @@ inline void registerTritonSharedDialects(mlir::DialectRegistry &registry) {
   mlir::triton::registerTritonArithToLinalgPasses();
   mlir::triton::registerStructuredToMemrefPasses();
   mlir::triton::registerAddLLVMDebugInfoPass();
+  mlir::triton::registerLinalgToVectorPass();
+  mlir::linalg::registerAllDialectInterfaceImplementations(registry);
+  mlir::tensor::registerInferTypeOpInterfaceExternalModels(registry);
 
   // TODO: register Triton & TritonGPU passes
   registry.insert<
