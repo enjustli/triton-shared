@@ -1098,10 +1098,23 @@ struct MatmulConverter : public OpConversionPattern<triton::DotOp> {
     auto zeroes = linalg::FillOp::create(rewriter, loc, ValueRange{zero},
                                          ValueRange{init})
                       .result();
+    Value res;
+    auto rank = dstType.getRank();
 
-    auto res = linalg::MatmulOp::create(rewriter, loc, ValueRange{opa, opb},
-                                        ValueRange{zeroes})
-                   .getResult(0);
+    if (rank == 2) {
+      // Standard matmul
+      res = linalg::MatmulOp::create(rewriter, loc, ValueRange{opa, opb},
+                                     ValueRange{zeroes})
+                .getResult(0);
+    } else if (rank == 3) {
+      // Batched matmul
+      res = linalg::BatchMatmulOp::create(rewriter, loc, ValueRange{opa, opb},
+                                          ValueRange{zeroes})
+                .getResult(0);
+    } else {
+      return rewriter.notifyMatchFailure(
+          op, "Only 2D or 3D inputs supported for tt.dot lowering");
+    }
 
     if (!skipC) {
       if (integers) {
