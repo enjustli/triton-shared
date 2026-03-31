@@ -7,12 +7,17 @@ import triton
 import triton.language as tl
 
 from triton.backends.triton_shared.driver import CPUDriver
-from triton.backends.triton_shared.compiler import _get_triton_shared_opt_path
 
 import os
 from pathlib import Path
 import subprocess
 import tempfile
+
+def _get_triton_shared_opt_path() -> str:
+    path = os.getenv("TRITON_SHARED_OPT_PATH", "")
+    if path == "":
+        raise Exception("TRITON_SHARED_OPT_PATH is not set.")
+    return path
 
 def run_triton_to_structured(ttir_code):
     with tempfile.TemporaryDirectory() as tmpdir:
