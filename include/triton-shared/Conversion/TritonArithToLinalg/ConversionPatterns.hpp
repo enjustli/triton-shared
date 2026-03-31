@@ -2079,6 +2079,69 @@ public:
   }
 };
 
+struct GatherConverter : public OpConversionPattern<triton::GatherOp> {
+  using OpConversionPattern<triton::GatherOp>::OpConversionPattern;
+
+  Value castIntToIndex(OpBuilder &b, Location loc, Value v) const {
+    return b.createOrFold<arith::IndexCastOp>(loc, b.getIndexType(), v);
+  }
+
+  void createGatherPayload(OpBuilder &b, Location loc, Value input, Value index,
+                           int64_t axis, int64_t rank) const {
+    SmallVector<Value> indices;
+    for (int i = 0; i < rank; i++) {
+      if (i == axis) {
+        indices.push_back(castIntToIndex(b, loc, index));
+      } else {
+        indices.push_back(linalg::IndexOp::create(b, loc, i));
+      }
+    }
+    // Assert index < input.sizes[axis]
+    auto dim = tensor::DimOp::create(b, loc, input, axis);
+    auto indexOverflow = arith::CmpIOp::create(
+        b, loc, arith::CmpIPredicate::slt, castIntToIndex(b, loc, index), dim);
+    cf::AssertOp::create(
+        b, loc, indexOverflow,
+        b.getStringAttr("index must be smaller than axis size"));
+
+    // Assert index >= 0
+    auto cst0 =
+        arith::ConstantOp::create(b, loc, b.getZeroAttr(index.getType()));
+    auto indexUnderflow =
+        arith::CmpIOp::create(b, loc, arith::CmpIPredicate::sge, index, cst0);
+    cf::AssertOp::create(b, loc, indexUnderflow,
+                         b.getStringAttr("index must be larger or equal to 0"));
+
+    Value extract = tensor::ExtractOp::create(b, loc, input, indices);
+    linalg::YieldOp::create(b, loc, extract);
+  }
+
+  LogicalResult
+  matchAndRewrite(triton::GatherOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op->getLoc();
+    auto src = adaptor.getSrc();
+    auto indices = adaptor.getIndices();
+    auto axis = op.getAxis();
+    auto resultType = cast<RankedTensorType>(op.getType());
+    int64_t rank = resultType.getRank();
+
+    Value empty = tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                          resultType.getElementType());
+    SmallVector<AffineMap, 2> affineMaps(2,
+                                         rewriter.getMultiDimIdentityMap(rank));
+    SmallVector<utils::IteratorType> iteratorTypes(
+        rank, utils::IteratorType::parallel);
+    rewriter.replaceOpWithNewOp<linalg::GenericOp>(
+        op, resultType, indices, empty, affineMaps, iteratorTypes,
+        [&](OpBuilder &b, Location loc, ValueRange args) {
+          auto index = args[0];
+          createGatherPayload(b, loc, src, index, axis, rank);
+        });
+    return success();
+  }
+};
+
 class ExternElementwiseBinaryOpConverter
     : public OpConversionPattern<triton::ExternElementwiseOp> {
   using OpConversionPattern<triton::ExternElementwiseOp>::OpConversionPattern;
