@@ -459,12 +459,13 @@ public:
                 })
                 .Case<scf::YieldOp>([](auto) { return success(); })
                 .Case<triton::CatOp>([](triton::CatOp op) {
-                  op->emitError("Do not support gather / scatter with multiple "
-                                "bases yet");
+                  LLVM_DEBUG(op->emitError(
+                      "Do not support gather / scatter with multiple "
+                      "bases yet"));
                   return failure();
                 })
                 .Default([&](Operation *op) {
-                  op->emitError("unexpected op in ptr sequence");
+                  LLVM_DEBUG(op->emitError("unexpected op in ptr sequence"));
                   return failure();
                 });
 
@@ -487,7 +488,8 @@ public:
                 if (other) {
                   other = tts::utils::getScalarValue(other, loc, b);
                   if (!other) {
-                    load->emitError("cannot parse `other` value for load");
+                    LLVM_DEBUG(
+                        load->emitError("cannot parse `other` value for load"));
                     return failure();
                   }
                 }
@@ -537,8 +539,8 @@ public:
                     } else {
                       // MakeTensorPtrOp only takes i32 offsets, so we need
                       // to truncate if the offsets were already in i64
-                      makeTensorPtr.emitWarning(
-                          "truncating offsets which may result in data loss");
+                      LLVM_DEBUG(makeTensorPtr.emitWarning(
+                          "truncating offsets which may result in data loss"));
                       baseOffset = arith::TruncIOp::create(b, loc, currOffType,
                                                            baseOffset);
                     }
@@ -554,7 +556,7 @@ public:
               })
 
               .Default([&](Operation *op) {
-                op->emitError("unexpected op in ptr sequence");
+                LLVM_DEBUG(op->emitError("unexpected op in ptr sequence"));
                 return failure();
               });
 
