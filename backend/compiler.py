@@ -10,7 +10,6 @@ import hashlib
 import tempfile
 import os
 import re
-import shutil
 import subprocess
 import functools
 import triton
@@ -168,7 +167,23 @@ class CPUBackend(BaseBackend):
             print("Building with sanitizer support...")
             # has to run before the other passes as operates on the tt dialect
             triton_shared.add_llvm_debug_info(pm)
-        triton_shared.add_triton_to_linalg_experimental(pm)
+        triton_shared.add_triton_to_structured(pm, True)
+        passes.common.add_cse(pm)
+        passes.common.add_canonicalizer(pm)
+        triton_shared.add_triton_to_unstructured(pm)
+        triton_shared.add_triton_arith_to_linalg(pm, True)
+        triton_shared.add_structured_to_memref(pm)
+        triton_shared.add_unstructured_to_memref(pm)
+        triton_shared.add_triton_ptr_to_memref(pm)
+        triton_shared.add_triton_to_ptr(pm)
+        triton_shared.add_reconcile_unrealized_casts(pm)
+        triton_shared.add_reconcile_ptr_casts(pm)
+        triton_shared.add_remove_dead_code(pm)
+        passes.common.add_cse(pm)
+        passes.common.add_canonicalizer(pm)
+        if os.getenv("TRITON_SHARED_ENABLE_COLLAPSE_SHAPE", False):
+            print("Building with collapse-shape enabled ...")
+            triton_shared.add_collapse_shape(pm)
         pm.run(mod, 'make_tt_shared_ir')
         return mod
 
