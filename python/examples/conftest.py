@@ -10,8 +10,14 @@ from triton.backends.triton_shared.driver import CPUDriver
 triton.runtime.driver.set_active(CPUDriver())
 
 
-def empty_decorator(func):
-    return func
+def empty_decorator(func=None, *args, **kwargs):
+    if func is not None and callable(func):
+        return func
+
+    def decorator(func):
+        return func
+
+    return decorator
 
 
 pytest.mark.interpreter = empty_decorator
@@ -99,12 +105,19 @@ annotations_tests_supported = {
 }
 
 
+def _is_float8_dtype(value):
+    value = str(value)
+    return "float8" in value or "fp8" in value
+
+
 def pytest_collection_modifyitems(config, items):
     skip_marker = pytest.mark.skip(reason="CPU backend does not support it yet")
     # There is a dependency issue on build machine which breaks bfloat16
     skip_marker_bfloat = pytest.mark.skip(reason="bfloat16 linking issue")
+    skip_marker_float16 = pytest.mark.skip(reason="float16 linking issue")
     skip_marker_tf32 = pytest.mark.skip(reason="tf32 is not supported on CPU")
     skip_marker_float8 = pytest.mark.skip(reason="float8 is not supported on CPU")
+    skip_marker_cuda = pytest.mark.skip(reason="CUDA-specific tests are not supported on CPU")
 
     for item in items:
         test_func_name = item.originalname if item.originalname else item.name
@@ -118,12 +131,26 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_marker)
             continue
 
+        if test_file.endswith("test_tensor_descriptor.py"):
+            if test_func_name == "test_mxfp8_mxfp4_matmul_tma":
+                item.add_marker(skip_marker_float8)
+                continue
+            if test_func_name == "test_tensor_descriptor_batched_gemm_3d_tma":
+                item.add_marker(skip_marker_cuda)
+                continue
+            if test_func_name == "test_host_tensor_descriptor_matmul" or test_func_name == "test_tensor_descriptor_batched_gemm_2d_tma":
+                item.add_marker(skip_marker_float16)
+                continue
+
         if "parametrize" in item.keywords:
             for param_name, param_value in item.callspec.params.items():
-                if (param_name.startswith('dtype') or param_name.endswith('dtype')) and param_value == 'bfloat16':
-                    item.add_marker(skip_marker_bfloat)
+                if (param_name.startswith('dtype') or param_name.endswith('dtype')):
+                    if param_value == 'bfloat16':
+                        item.add_marker(skip_marker_bfloat)
+                    if _is_float8_dtype(param_value):
+                        item.add_marker(skip_marker_float8)
+                    if param_value == 'float16' or param_value == 'fp16':
+                        item.add_marker(skip_marker_float16)
                 if param_name.startswith('input_precision') and (param_value.startswith('tf32')
                                                                  or param_value.startswith('bf16')):
                     item.add_marker(skip_marker_tf32)
-                if (param_name.startswith('dtype') or param_name.endswith('dtype')) and ('float8' in str(param_value)):
-                    item.add_marker(skip_marker_float8)

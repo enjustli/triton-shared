@@ -9,11 +9,12 @@ import subprocess
 import platform
 import importlib.util
 import sys
+import re
 
 from pathlib import Path
 
 from triton.runtime.cache import get_cache_manager
-from triton.backends.driver import DriverBase
+from triton.backends.driver import DriverBase, decompose_descriptor, expand_signature, wrap_handle_tensordesc_impl
 from triton.backends.compiler import GPUTarget
 
 def _get_llvm_bin_path(bin_name: str) -> str:
@@ -43,6 +44,8 @@ def _sanitizer_available(sanitizer_type):
 
 # -------------------- Launcher ----------------------------
 def _ty_to_cpp(ty):
+    if isinstance(ty, str) and ty.startswith("tensordesc_base<"):
+        return "void*"
     if ty[0] == '*':
         return "void*"
     if ty == "constexpr":
@@ -81,6 +84,8 @@ def _extracted_type(ty):
         return f"[{val}]"
     if ty[0] == '*':
         return "PyObject*"
+    if _is_tensordesc_base(ty):
+        return "PyObject*"
     if ty == "constexpr":
         return "PyObject*"
     return _ty_to_cpp(ty)
@@ -90,6 +95,8 @@ def _format_of(ty):
         val = ''.join(map(_format_of, ty))
         return f"({val})"
     if ty[0] == '*':
+        return "O"
+    if _is_tensordesc_base(ty):
         return "O"
     if ty == "constexpr":
         return "O"
@@ -111,6 +118,169 @@ def _format_of(ty):
       "uint64_t": "K",
     }[_ty_to_cpp(ty)]
 
+def _is_tensordesc(ty):
+    return isinstance(ty, str) and ty.startswith("tensordesc")
+
+def _parse_tensordesc(descriptor):
+    match = re.match(r"tensordesc(?:_im2col)?<([^[>]*)\[([^\]]*)\]", descriptor)
+    if not match:
+        raise AssertionError(f"Malformed tensor descriptor type: {descriptor}")
+    block_shape = match.group(2)
+    block_ndim = block_shape.count(",") + 1
+    rank_match = re.search(r",input_rank=(\d+)", descriptor)
+    ndim = int(rank_match.group(1)) if rank_match else block_ndim
+    return match.group(1), ndim
+
+def _tensordesc_base_ty(dtype, ndim):
+    return f"tensordesc_base<{dtype},{ndim}>"
+
+def _is_tensordesc_base(ty):
+    return isinstance(ty, str) and ty.startswith("tensordesc_base<")
+
+def _parse_tensordesc_base(ty):
+    match = re.match(r"tensordesc_base<([^,]+),(\d+)>", ty)
+    if not match:
+        raise AssertionError(f"Malformed tensor descriptor base type: {ty}")
+    return match.group(1), int(match.group(2))
+
+def _is_pointer_like(ty):
+    return isinstance(ty, str) and (ty[0] == "*" or _is_tensordesc_base(ty))
+
+def _expand_tensordesc_signature(sig):
+    if isinstance(sig, tuple):
+        expanded = []
+        for x in sig:
+            value = _expand_tensordesc_signature(x)
+            if isinstance(value, tuple):
+                expanded.extend(value)
+            else:
+                expanded.append(value)
+        return tuple(expanded)
+    if _is_tensordesc(sig):
+        dtype, ndim = _parse_tensordesc(sig)
+        return (_tensordesc_base_ty(dtype, ndim), *("i64" for _ in range(ndim)),
+                *("i64" for _ in range(ndim)), "i1", "i1", *("i32" for _ in range(ndim)),
+                *("i64" for _ in range(ndim)))
+    return sig
+
+def _expand_signature_dict(signature, constants):
+    expanded_signature = {}
+    expanded_constants = {}
+    next_idx = 0
+
+    def expand_top_level(sig):
+        if _is_tensordesc(sig):
+            return list(_expand_tensordesc_signature(sig))
+        if isinstance(sig, tuple):
+            return [expand_nested_tuple(sig)]
+        return [sig]
+
+    def expand_nested_tuple(sig):
+        expanded = []
+        for elem in sig:
+            if _is_tensordesc(elem):
+                expanded.extend(_expand_tensordesc_signature(elem))
+            elif isinstance(elem, tuple):
+                expanded.append(expand_nested_tuple(elem))
+            else:
+                expanded.append(elem)
+        return tuple(expanded)
+
+    for idx, sig in signature.items():
+        for ty in expand_top_level(sig):
+            expanded_signature[next_idx] = ty
+            if idx in constants:
+                expanded_constants[next_idx] = constants[idx]
+            next_idx += 1
+    return expanded_signature, expanded_constants
+
+def _kernel_arg_decls(signature):
+    decls = []
+    items = list(signature.items())
+    i = 0
+    while i < len(items):
+        _, ty = items[i]
+        if ty == "constexpr":
+            i += 1
+            continue
+        if _is_tensordesc_base(ty):
+            _, ndim = _parse_tensordesc_base(ty)
+            decls.extend(["int64_t", "void*"])
+            decls.extend(["bool", "bool"])
+            decls.extend("int32_t" for _ in range(ndim))
+            decls.extend("int64_t" for _ in range(ndim))
+            i += 4 * ndim + 3
+            continue
+        if ty[0] == "*":
+            decls.extend(["int64_t", "void*"])
+        else:
+            decls.append(_ty_to_cpp(ty))
+        i += 1
+    return ', '.join(decls)
+
+def _kernel_parameters(signature):
+    params = []
+    items = list(signature.items())
+    i = 0
+    while i < len(items):
+        idx, ty = items[i]
+        if ty == "constexpr":
+            i += 1
+            continue
+        if _is_tensordesc_base(ty):
+            _, ndim = _parse_tensordesc_base(ty)
+            padding_idx = items[i + 1 + 2 * ndim][0]
+            tf32_idx = items[i + 2 + 2 * ndim][0]
+            shape_idxs = [items[i + 3 + 2 * ndim + dim][0] for dim in range(ndim)]
+            stride_idxs = [items[i + 3 + 3 * ndim + dim][0] for dim in range(ndim)]
+            params.extend([str(ndim), f"&ptr_arg{idx}"])
+            params.extend([f"static_cast<bool>(arg{padding_idx})",
+                           f"static_cast<bool>(arg{tf32_idx})"])
+            params.extend(f"arg{shape_idx}" for shape_idx in shape_idxs)
+            params.extend(f"arg{stride_idx}" for stride_idx in stride_idxs)
+            i += 4 * ndim + 3
+            continue
+        if ty[0] == "*":
+            params.append(f"0, &ptr_arg{idx}")
+        else:
+            params.append(f"static_cast<{_ty_to_cpp(ty)}>(arg{idx})")
+        i += 1
+    return ', '.join(params)
+
+def _pointer_arg_decls(signature, constants):
+    decls = []
+    items = list(signature.items())
+    i = 0
+    while i < len(items):
+        idx, ty = items[i]
+        if idx in constants:
+            i += 1
+            continue
+        if _is_tensordesc_base(ty):
+            dtype, ndim = _parse_tensordesc_base(ty)
+            shape_idxs = [items[i + 1 + dim][0] for dim in range(ndim)]
+            stride_idxs = [items[i + 1 + ndim + dim][0] for dim in range(ndim)]
+            shape_values = ', '.join(f"arg{shape_idx}" for shape_idx in shape_idxs)
+            stride_values = ', '.join(f"arg{stride_idx}" for stride_idx in stride_idxs)
+            cpp_ty = _ty_to_cpp(dtype)
+            decls.append(
+                f"StridedMemRefType<{cpp_ty}, {ndim}> ptr_arg{idx} = "
+                f"{{static_cast<{cpp_ty} *>(arg{idx}), static_cast<{cpp_ty} *>(arg{idx}), 0, "
+                f"{{{shape_values}}}, {{{stride_values}}}}};")
+            i += 4 * ndim + 3
+            continue
+        if _is_pointer_like(ty):
+            decls.append(
+                f"StridedMemRefType<char, 0> ptr_arg{idx} = "
+                f"{{static_cast<char *>(arg{idx}), static_cast<char *>(arg{idx}), 0}};")
+        i += 1
+    return ' '.join(decls)
+
+def make_tensordesc_arg(arg, metadata, _):
+    if metadata is None:
+        return decompose_descriptor(arg)
+    raise NotImplementedError("CPU tensor descriptor metadata is not supported")
+
 def _generate_launcher(constants, signature, kernel_name):
     args_format = ''.join([_format_of(ty) for ty in signature.values()])
     format = "iiiOOOO" + args_format
@@ -122,11 +292,12 @@ def _generate_launcher(constants, signature, kernel_name):
     arg_decls = ', '.join(f"{_ty_to_cpp(ty)} arg{i}" for i, ty in signature.items())
     args_list = ', ' + ', '.join(f"&_arg{i}" for i, ty in signature.items()) if len(signature) > 0 else ''
 
-    kernel_arg_decls = ', '.join(_ty_to_cpp(ty) if ty[0] != "*" else "int64_t, void*" for i, ty in signature.items() if ty != "constexpr")
+    kernel_arg_decls = _kernel_arg_decls(signature)
     kernel_arg_decls += ', ' if kernel_arg_decls else ''
 
-    kernel_parameters = ', '.join(f"static_cast<{_ty_to_cpp(ty)}>(arg{i})" if ty[0] != "*" else f"0, &ptr_arg{i}" for i, ty in signature.items() if ty != "constexpr")
+    kernel_parameters = _kernel_parameters(signature)
     kernel_parameters += ', ' if kernel_parameters else ''
+    pointer_arg_decls = _pointer_arg_decls(signature, constants)
 
     return f"""
 #include <assert.h>
@@ -151,8 +322,7 @@ static void _launch(int gridX, int gridY, int gridZ, {arg_decls}) {{
     for(int x = 0; x < gridX; x++) {{
       for(int y = 0; y < gridY; y++) {{
         for(int z = 0; z < gridZ; z++) {{
-          // Use some random type "char" here.
-          {' '.join(f'StridedMemRefType<char, 0> ptr_arg{i} = {{static_cast<char *>(arg{i}), static_cast<char *>(arg{i}), 0}};' for i, ty in signature.items() if i not in constants and ty[0] == "*")}
+          {pointer_arg_decls}
           {kernel_name}({kernel_parameters}
                         gridX, gridY, gridZ, x, y, z);
         }}
@@ -232,8 +402,8 @@ static PyObject* launch(PyObject* self, PyObject* args) {{
   }}
 
   // raise exception asap
-  {"; ".join([f"DevicePtrInfo ptr_info{i} = getPointer(_arg{i}, {i}); if (!ptr_info{i}.valid) return NULL;" if ty[0] == "*" else "" for i, ty in signature.items()])};
-  _launch(gridX, gridY, gridZ, {', '.join(f"ptr_info{i}.dev_ptr" if ty[0]=="*" else f"_arg{i}"for i, ty in signature.items())});
+  {"; ".join([f"DevicePtrInfo ptr_info{i} = getPointer(_arg{i}, {i}); if (!ptr_info{i}.valid) return NULL;" if _is_pointer_like(ty) else "" for i, ty in signature.items()])};
+  _launch(gridX, gridY, gridZ, {', '.join(f"ptr_info{i}.dev_ptr" if _is_pointer_like(ty) else f"_arg{i}"for i, ty in signature.items())});
 
   if (PyErr_Occurred()) {{
     return NULL;
@@ -379,10 +549,11 @@ def compile_module(launcher_src, kernel_placeholder_name):
             raise RuntimeError(f"Cannot find {name} module in {cache_path}")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
+        kernel_args = args[0] if len(args) == 1 else args
         return mod.launch(gridX, gridY, gridZ,
                           kernel_metadata, launch_metadata,
                           launch_enter_hook, launch_exit_hook,
-                          *args)
+                          *kernel_args)
 
     return launch
 
@@ -397,13 +568,18 @@ class CPULauncher(object):
             return src.fn.arg_names.index(i) if isinstance(i, str) else i
         constants = {cst_key(key): value for key, value in constants.items()}
         signature = {cst_key(key): value for key, value in src.signature.items()}
-        launcher_src = _generate_launcher(constants, signature, kernel_placeholder_name)
+        expanded_signature, expanded_constants = _expand_signature_dict(signature, constants)
+        launcher_src = _generate_launcher(expanded_constants, expanded_signature, kernel_placeholder_name)
         # Later KERNEL_NAME_PLACEHOLDER will be used to assign the kernel name
         # in the following launch function.
-        self.launch = compile_module(launcher_src, kernel_placeholder_name)
+        tensordesc_meta = getattr(metadata, "tensordesc_meta", None)
+        self.launch = wrap_handle_tensordesc_impl(compile_module(launcher_src, kernel_placeholder_name), signature,
+                                              tensordesc_meta, make_tensordesc_arg)
 
-    def __call__(self, *args, **kwargs):
-        self.launch(*args, **kwargs)
+    def __call__(self, gridX, gridY, gridZ, stream, function, kernel_metadata, launch_metadata, launch_enter_hook,
+                 launch_exit_hook, *args):
+        self.launch(gridX, gridY, gridZ, stream, function, kernel_metadata, launch_metadata, launch_enter_hook,
+                    launch_exit_hook, args)
 
 
 

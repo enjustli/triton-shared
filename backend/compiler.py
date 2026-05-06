@@ -149,7 +149,6 @@ class CPUBackend(BaseBackend):
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
         passes.common.add_inliner(pm)
-        passes.ttir.add_rewrite_tensor_descriptor_to_pointer(pm)
         passes.common.add_canonicalizer(pm)
         passes.ttir.add_combine(pm)
         passes.ttir.add_reorder_broadcast(pm)
@@ -170,6 +169,7 @@ class CPUBackend(BaseBackend):
             triton_shared.add_llvm_debug_info(pm)
         triton_shared.add_triton_to_linalg_experimental(pm)
         pm.run(mod, 'make_tt_shared_ir')
+        metadata["tensordesc_meta"] = list()
         return mod
 
     @staticmethod
