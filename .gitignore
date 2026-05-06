@@ -5,3 +5,4 @@ build/*
 .vscode/*
 /python/examples/test_core.py
 /python/examples/test_annotations.py
+/python/examples/test_tensor_descriptor.py

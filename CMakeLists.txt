@@ -34,8 +34,11 @@ endif()
 # run under triton-shared's conftest configuration.
 cmake_path(APPEND CMAKE_CURRENT_SOURCE_DIR "python" "examples" "test_core.py" OUTPUT_VARIABLE TRITON_SHARED_TEST_CORE)
 cmake_path(APPEND CMAKE_CURRENT_SOURCE_DIR "python" "examples" "test_annotations.py" OUTPUT_VARIABLE TRITON_SHARED_TEST_ANNOTATIONS)
+cmake_path(APPEND CMAKE_CURRENT_SOURCE_DIR "python" "examples" "test_tensor_descriptor.py" OUTPUT_VARIABLE TRITON_SHARED_TEST_TENSOR_DESCRIPTOR)
 cmake_path(APPEND CMAKE_SOURCE_DIR "python" "test" "unit" "language" "test_core.py" OUTPUT_VARIABLE TRITON_TEST_CORE)
 cmake_path(APPEND CMAKE_SOURCE_DIR "python" "test" "unit" "language" "test_annotations.py" OUTPUT_VARIABLE TRITON_TEST_ANNOTATIONS)
+cmake_path(APPEND CMAKE_SOURCE_DIR "python" "test" "unit" "language" "test_tensor_descriptor.py" OUTPUT_VARIABLE TRITON_TEST_TENSOR_DESCRIPTOR)
 
 add_symlink(${TRITON_TEST_CORE} ${TRITON_SHARED_TEST_CORE})
 add_symlink(${TRITON_TEST_ANNOTATIONS} ${TRITON_SHARED_TEST_ANNOTATIONS})
+add_symlink(${TRITON_TEST_TENSOR_DESCRIPTOR} ${TRITON_SHARED_TEST_TENSOR_DESCRIPTOR})

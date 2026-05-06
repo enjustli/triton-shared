@@ -10,8 +10,14 @@ from triton.backends.triton_shared.driver import CPUDriver
 triton.runtime.driver.set_active(CPUDriver())
 
 
-def empty_decorator(func):
-    return func
+def empty_decorator(func=None, *args, **kwargs):
+    if func is not None and callable(func):
+        return func
+
+    def decorator(func):
+        return func
+
+    return decorator
 
 
 pytest.mark.interpreter = empty_decorator
