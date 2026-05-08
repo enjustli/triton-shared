@@ -92,7 +92,8 @@ public:
         bufferization::BufferizationDialect, ttx::TritonTilingExtDialect,
         memref::MemRefDialect>();
 
-    target.addIllegalOp<tts::LoadOp, tts::StoreOp, tts::MakeTensorPtrOp>();
+    target.addIllegalOp<tts::LoadOp, tts::StoreOp, tts::ReduceOp,
+                        tts::MakeTensorPtrOp>();
 
     target.addLegalOp<UnrealizedConversionCastOp>();
 

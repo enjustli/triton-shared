@@ -120,6 +120,70 @@ static OpFoldResult accumulateTargetOffset(Location loc,
   return targetOffset;
 }
 
+static Value createReduceValue(OpBuilder &builder, Location loc,
+                               triton::DescriptorReduceKind kind,
+                               Type elementType, Value current, Value update) {
+  bool isInteger = elementType.isIntOrIndex();
+  bool isFloat = isa<FloatType>(elementType);
+  switch (kind) {
+  case triton::DescriptorReduceKind::ADD:
+    if (isFloat)
+      return arith::AddFOp::create(builder, loc, current, update);
+    return arith::AddIOp::create(builder, loc, current, update);
+  case triton::DescriptorReduceKind::MIN:
+    if (isFloat)
+      return arith::MinimumFOp::create(builder, loc, current, update);
+    return arith::MinSIOp::create(builder, loc, current, update);
+  case triton::DescriptorReduceKind::MAX:
+    if (isFloat)
+      return arith::MaximumFOp::create(builder, loc, current, update);
+    return arith::MaxSIOp::create(builder, loc, current, update);
+  case triton::DescriptorReduceKind::AND:
+    assert(isInteger && "tts.reduce and expects integer element type");
+    return arith::AndIOp::create(builder, loc, current, update);
+  case triton::DescriptorReduceKind::OR:
+    assert(isInteger && "tts.reduce or expects integer element type");
+    return arith::OrIOp::create(builder, loc, current, update);
+  case triton::DescriptorReduceKind::XOR:
+    assert(isInteger && "tts.reduce xor expects integer element type");
+    return arith::XOrIOp::create(builder, loc, current, update);
+  case triton::DescriptorReduceKind::INC: {
+    assert(isInteger && "tts.reduce inc expects integer element type");
+    Value zero =
+        arith::ConstantOp::create(builder, loc, builder.getZeroAttr(elementType));
+    Value one =
+        arith::ConstantOp::create(builder, loc, builder.getOneAttr(elementType));
+    Value currentIsZero = arith::CmpIOp::create(
+        builder, loc, arith::CmpIPredicate::eq, current, zero);
+    Value currentGreater = arith::CmpIOp::create(
+        builder, loc, arith::CmpIPredicate::sgt, current, update);
+    Value currentPlusOne = arith::AddIOp::create(builder, loc, current, one);
+    Value wrapToZero =
+        arith::OrIOp::create(builder, loc, currentIsZero, currentGreater);
+    return arith::SelectOp::create(builder, loc, wrapToZero, zero,
+                                   currentPlusOne);
+  }
+  case triton::DescriptorReduceKind::DEC: {
+    assert(isInteger && "tts.reduce dec expects integer element type");
+    Value zero =
+        arith::ConstantOp::create(builder, loc, builder.getZeroAttr(elementType));
+    Value one =
+        arith::ConstantOp::create(builder, loc, builder.getOneAttr(elementType));
+    Value currentIsZero = arith::CmpIOp::create(
+        builder, loc, arith::CmpIPredicate::eq, current, zero);
+    Value currentMinusOne = arith::SubIOp::create(builder, loc, current, one);
+    Value currentGreater = arith::CmpIOp::create(
+        builder, loc, arith::CmpIPredicate::sgt, current, update);
+    Value wrapToUpdate =
+        arith::OrIOp::create(builder, loc, currentIsZero, currentGreater);
+    return arith::SelectOp::create(builder, loc, wrapToUpdate, update,
+                                   currentMinusOne);
+  }
+  }
+
+  llvm_unreachable("unexpected tts.reduce kind");
+}
+
 static OpFoldResult accumulateTargetOffset(Location loc,
                                            ArrayRef<OpFoldResult> offsets,
                                            ArrayRef<OpFoldResult> strides,
@@ -1143,11 +1207,87 @@ public:
   }
 };
 
+struct ReduceConverter : public OpConversionPattern<tts::ReduceOp> {
+private:
+  using OpConversionPattern<tts::ReduceOp>::OpConversionPattern;
+
+  static tensor::ExtractSliceOp
+  getExtractSlice(int rank, ArrayRef<OpFoldResult> dims, Value source,
+                  const Location loc, OpBuilder &b) {
+    auto sourceType = cast<RankedTensorType>(source.getType());
+    SmallVector<OpFoldResult> offsets(rank, b.getIndexAttr(0));
+    SmallVector<OpFoldResult> strides(rank, b.getIndexAttr(1));
+
+    auto dstType = tensor::ExtractSliceOp::inferResultType(sourceType, dims);
+
+    return tensor::ExtractSliceOp::create(b, loc, dstType, source, offsets,
+                                          dims, strides);
+  }
+
+  LogicalResult rewriteReduce(tts::ReduceOp op, Value ptr, Value value,
+                              ConversionPatternRewriter &rewriter) const {
+    auto loc = op.getLoc();
+    Value dst = ptr;
+    Value src = value;
+    auto srcType = cast<RankedTensorType>(value.getType());
+    int rank = srcType.getRank();
+
+    if (op.hasMask()) {
+      auto mixedDims = op.getMixedMaskDims();
+      src = getExtractSlice(rank, mixedDims, value, loc, rewriter);
+      dst = getSubview(rank, mixedDims, ptr, loc, rewriter);
+      srcType = cast<RankedTensorType>(src.getType());
+    }
+
+    auto dstType = cast<MemRefType>(dst.getType());
+    auto partialAllocType =
+        MemRefType::get(dstType.getShape(), srcType.getElementType());
+    SmallVector<Value> dynamicSizes;
+    for (auto [dim, size] : llvm::enumerate(partialAllocType.getShape())) {
+      if (ShapedType::isDynamic(size))
+        dynamicSizes.push_back(memref::DimOp::create(rewriter, loc, dst, dim));
+    }
+    auto partialAlloc = memref::AllocOp::create(rewriter, loc,
+                                                partialAllocType, dynamicSizes);
+    memref::CopyOp::create(rewriter, loc, dst, partialAlloc);
+
+    Value partialTensor =
+        bufferization::ToTensorOp::create(rewriter, loc, srcType, partialAlloc,
+                                          true /*restrict*/, true /*writable*/);
+    auto reduceOp = linalg::ReduceOp::create(
+        rewriter, loc, ValueRange{src}, ValueRange{partialTensor},
+        ArrayRef<int64_t>{},
+        [&](OpBuilder &b, Location nestedLoc, ValueRange args) {
+          Value reduced =
+              createReduceValue(b, nestedLoc, op.getKind(),
+                                srcType.getElementType(), args[1], args[0]);
+          linalg::YieldOp::create(b, nestedLoc, reduced);
+        });
+    auto storeOp = bufferization::MaterializeInDestinationOp::create(
+        rewriter, loc, reduceOp.getResult(0), dst);
+    storeOp.setWritable(true);
+
+    rewriter.eraseOp(op);
+    return success();
+  }
+
+public:
+  ReduceConverter(const TypeConverter &typeConverter, MLIRContext *context)
+      : OpConversionPattern<tts::ReduceOp>(typeConverter, context) {}
+
+  LogicalResult
+  matchAndRewrite(tts::ReduceOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    return rewriteReduce(op, adaptor.getPtr(), adaptor.getValue(), rewriter);
+  }
+};
+
 } // namespace
 
 void mlir::triton::populateStructuredToMemrefConversionPatterns(
     RewritePatternSet &patterns, TypeConverter &typeConverter) {
   patterns.add<MakeTensorPtrConverter, MakeGatherScatterTensorPtrConverter>(
       typeConverter, patterns.getContext());
-  patterns.add<LoadConverter, StoreConverter>(patterns.getContext());
+  patterns.add<LoadConverter, StoreConverter, ReduceConverter>(
+      patterns.getContext());
 }

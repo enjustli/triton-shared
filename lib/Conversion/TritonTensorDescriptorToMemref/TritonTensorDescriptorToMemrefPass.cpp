@@ -923,6 +923,16 @@ struct DescriptorReduceConverter
               "shape");
     }
 
+    if (auto descPtr = getDescriptorTensorPtr(descPayload.memref)) {
+      auto indices = castToIndex(rewriter, loc, op.getIndices());
+      auto accessPtr =
+          createDescriptorAccessTensorPtr(rewriter, loc, descPtr, indices);
+      tts::ReduceOp::create(rewriter, loc, op.getKind(), accessPtr.getResult(),
+                            op.getSrc(), ArrayRef<OpFoldResult>{});
+      rewriter.eraseOp(op);
+      return success();
+    }
+
     auto indices = castToIndex(rewriter, loc, op.getIndices());
     auto dstSubview = getSubview(desc, indices, blockShape, loc, rewriter);
     auto partialMemRefType =

@@ -340,6 +340,18 @@ void StoreOp::build(OpBuilder &b, OperationState &state, Value ptr, Value value,
   build(b, state, ptr, value, dynamicDims, b.getDenseI64ArrayAttr(staticDims));
 }
 
+void ReduceOp::build(OpBuilder &b, OperationState &state,
+                     triton::DescriptorReduceKind kind, Value ptr, Value value,
+                     ArrayRef<OpFoldResult> dims) {
+  SmallVector<int64_t> staticDims;
+  SmallVector<Value> dynamicDims;
+
+  dispatchIndexOpFoldResults(dims, dynamicDims, staticDims);
+
+  build(b, state, triton::DescriptorReduceKindAttr::get(b.getContext(), kind),
+        ptr, value, dynamicDims, b.getDenseI64ArrayAttr(staticDims));
+}
+
 LogicalResult GetStructuredStateOp::verify() {
   auto expectedOffsetAndStrideTypes =
       getOffsetAndStrideTypes(getContext(), getInput().getType());

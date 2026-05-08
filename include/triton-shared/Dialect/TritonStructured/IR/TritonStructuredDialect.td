@@ -10,6 +10,7 @@
 
 include "mlir/IR/OpBase.td"
 include "triton/Dialect/Triton/IR/TritonTypes.td"
+include "triton/Dialect/Triton/IR/TritonAttrDefs.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
 
 def Triton_Structured_Dialect : Dialect {
@@ -347,6 +348,47 @@ def TTS_StoreOp : TTS_Op<"store", [
 
   let extraClassDeclaration = [{
     /// Return a vector of all the static or dynamic fields
+    SmallVector<OpFoldResult> getMixedMaskDims() {
+      Builder b(getContext());
+      return ::mlir::getMixedValues(getStaticMaskDims(), getMaskDims(), b);
+    }
+
+    bool hasMask() {
+      return !getMixedMaskDims().empty();
+    }
+  }];
+
+  // TODO
+  //let hasCustomAssemblyFormat = 1;
+  //let hasVerifier = 1;
+}
+
+def TTS_ReduceOp : TTS_Op<"reduce", [
+  MemoryEffects<[MemRead, MemWrite]>
+]> {
+  let summary = "performs a reducing store operation based on a structured pointer";
+  let description = [{
+    The `tts.reduce` operation applies a reducing store to the memory described
+    by a structured pointer. It is the structured-pointer counterpart of
+    `tt.descriptor_reduce`.
+  }];
+
+  let arguments = (ins TT_DescriptorReduceKindAttr:$kind,
+                       TT_PtrLike:$ptr,
+                       TT_Tensor:$value,
+                       Variadic<Index>:$mask_dims,
+                       DenseI64ArrayAttr:$static_mask_dims);
+
+  let builders = [
+    OpBuilder<(ins
+      "::mlir::triton::DescriptorReduceKind":$kind,
+      "Value":$ptr,
+      "Value":$value,
+      "ArrayRef<OpFoldResult>":$dims)>,
+  ];
+
+  let extraClassDeclaration = [{
+    /// Return a vector of all the static or dynamic fields.
     SmallVector<OpFoldResult> getMixedMaskDims() {
       Builder b(getContext());
       return ::mlir::getMixedValues(getStaticMaskDims(), getMaskDims(), b);

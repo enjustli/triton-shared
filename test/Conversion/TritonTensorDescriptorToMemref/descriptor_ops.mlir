@@ -65,18 +65,10 @@ module {
 // CHECK: tt.return
 
 // CHECK-LABEL: tt.func @descriptor_reduce(
-// CHECK: %[[SUBVIEW:.*]] = memref.{{(subview|cast)}}
-// CHECK-SAME: to memref<2x4xi32
-// CHECK: %[[CAST:.*]] = memref.cast %[[SUBVIEW]]
-// CHECK: memref.alloc() : memref<2x4xi32>
-// CHECK: %[[INIT:.*]] = bufferization.to_tensor
-// CHECK: linalg.reduce
-// CHECK-SAME: arith.addi
-// CHECK-SAME: ins(%{{[^ ]*}} : tensor<2x4xi32>)
-// CHECK-SAME: outs(%[[INIT]]
-// CHECK-SAME: dimensions = []
-// CHECK: bufferization.materialize_in_destination
-// CHECK-SAME: in writable %[[CAST]]
+// CHECK: %[[REDUCE_TPTR:.*]] = tts.make_tptr
+// CHECK-SAME: to sizes: [2, 4]
+// CHECK-SAME: shape: [0, 0]
+// CHECK: "tts.reduce"(%[[REDUCE_TPTR]]
 // CHECK-NOT: tt.descriptor_reduce
 // CHECK: tt.return
 
