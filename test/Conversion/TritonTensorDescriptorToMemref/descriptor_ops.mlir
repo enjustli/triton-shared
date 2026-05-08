@@ -50,21 +50,15 @@ module {
 
 // CHECK-LABEL: tt.func @descriptor_ops(
 // CHECK-SAME: %[[SRC_PTR:.*]]: !tt.ptr<i32>, %[[DST_PTR:.*]]: !tt.ptr<i32>, %[[M:.*]]: i32, %[[N:.*]]: i32
-// CHECK: %[[SRC:.*]] = builtin.unrealized_conversion_cast %[[SRC_PTR]] : !tt.ptr<i32> to memref<*xi32>
-// CHECK: %[[SRC_DESC:.*]] = memref.reinterpret_cast %[[SRC]]
-// CHECK-SAME: sizes: [{{[^]]+}}], strides: [4, 1]
-// CHECK-SAME: to memref<?x?xi32, strided<[4, 1]>>
-// CHECK: %[[DST:.*]] = builtin.unrealized_conversion_cast %[[DST_PTR]] : !tt.ptr<i32> to memref<*xi32>
-// CHECK: %[[DST_DESC:.*]] = memref.reinterpret_cast %[[DST]]
-// CHECK-SAME: sizes: [{{[^]]+}}], strides: [4, 1]
-// CHECK-SAME: to memref<?x?xi32, strided<[4, 1]>>
 // CHECK: arith.maxsi
-// CHECK: %[[LOAD_ALLOC:.*]] = memref.alloc() : memref<2x4xi32>
-// CHECK: scf.if
-// CHECK: memref.copy
-// CHECK: %[[VAL:.*]] = bufferization.to_tensor %[[LOAD_ALLOC]] restrict writable : memref<2x4xi32> to tensor<2x4xi32>
-// CHECK: scf.if
-// CHECK: bufferization.materialize_in_destination
+// CHECK: %[[SRC_TPTR:.*]] = tts.make_tptr %[[SRC_PTR]]
+// CHECK-SAME: to sizes: [2, 4]
+// CHECK-SAME: shape: [0, 0]
+// CHECK: %[[VAL:.*]] = "tts.load"(%[[SRC_TPTR]]
+// CHECK-SAME: tensor<2x4x!tt.ptr<i32>>
+// CHECK: %[[DST_TPTR:.*]] = tts.make_tptr %[[DST_PTR]]
+// CHECK-SAME: to sizes: [2, 4]
+// CHECK: "tts.store"(%[[DST_TPTR]], %[[VAL]]
 // CHECK-NOT: tt.make_tensor_descriptor
 // CHECK-NOT: tt.descriptor_load
 // CHECK-NOT: tt.descriptor_store
@@ -87,27 +81,35 @@ module {
 // CHECK: tt.return
 
 // CHECK-LABEL: tt.func @descriptor_gather(
-// CHECK: %[[EMPTY:.*]] = tensor.empty() : tensor<8x8xi32>
-// CHECK: %[[GENERIC:.*]] = linalg.generic
-// CHECK-SAME: ins(%{{.*}} : tensor<8xi32>)
-// CHECK-SAME: outs(%[[EMPTY]] : tensor<8x8xi32>)
-// CHECK:   memref.load
-// CHECK:   linalg.yield
+// CHECK: arith.cmpi sge
+// CHECK: tt.splat
+// CHECK: arith.cmpi slt
+// CHECK: arith.andi
+// CHECK: %[[GATHER_PTR:.*]] = tts.make_gather_scatter_tptr
+// CHECK-SAME: gather_scatter_dim: 0
+// CHECK-SAME: gather_scatter_offset:
+// CHECK-SAME: gather_scatter_mask:
+// CHECK: %[[GATHER:.*]] = "tts.load"(%[[GATHER_PTR]]
 // CHECK-NOT: tt.descriptor_gather
-// CHECK: tt.return %[[GENERIC]]
+// CHECK: tt.return %[[GATHER]]
 
 // CHECK-LABEL: tt.func @descriptor_scatter(
-// CHECK: linalg.generic
-// CHECK-SAME: ins(%{{.*}}, %{{.*}} : tensor<8xi32>, tensor<8x8xi32>)
-// CHECK:   memref.store
-// CHECK:   linalg.yield
+// CHECK: arith.cmpi sge
+// CHECK: tt.splat
+// CHECK: arith.cmpi slt
+// CHECK: arith.andi
+// CHECK: %[[SCATTER_PTR:.*]] = tts.make_gather_scatter_tptr
+// CHECK-SAME: gather_scatter_dim: 0
+// CHECK-SAME: gather_scatter_offset:
+// CHECK-SAME: gather_scatter_mask:
+// CHECK: "tts.store"(%[[SCATTER_PTR]]
 // CHECK-NOT: tt.descriptor_scatter
 // CHECK: tt.return
 
 // CHECK-LABEL: tt.func public @descriptor_signature(
-// CHECK-SAME: memref<*xi32>
+// CHECK-SAME: !tt.ptr<i32>
 // CHECK-SAME: i1
 // CHECK-SAME: i1
-// CHECK-SAME: -> (memref<*xi32>, i1, i1)
+// CHECK-SAME: -> (!tt.ptr<i32>, i1, i1)
 // CHECK: tt.return
-// CHECK-SAME: memref<*xi32>, i1, i1
+// CHECK-SAME: !tt.ptr<i32>, i1, i1

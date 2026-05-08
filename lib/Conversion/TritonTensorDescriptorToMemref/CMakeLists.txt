@@ -21,6 +21,7 @@ add_triton_library(TritonTensorDescriptorToMemref
   MLIRSupport
   TPtrIR
   TritonIR
+  TritonStructuredIR
   TritonTransforms
   TritonSharedUtils
 )

@@ -16,6 +16,7 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/Dialect/Utils/StaticValueUtils.h"
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
@@ -39,6 +40,7 @@
 #include "triton-shared/AnalysisStructured/PtrAnalysis.h"
 #include "triton-shared/Conversion/TritonTensorDescriptorToMemref/TritonTensorDescriptorToMemref.h"
 #include "triton-shared/Dialect/TPtr/IR/TPtrDialect.h"
+#include "triton-shared/Dialect/TritonStructured/IR/TritonStructuredDialect.h"
 #include "triton-shared/Utils/Utils.h"
 
 #include "triton/Dialect/Triton/IR/Dialect.h"
@@ -342,8 +344,10 @@ static Value createDescriptorReduceValue(OpBuilder &builder, Location loc,
 static Type convertTensorDescType(MLIRContext *context,
                                   triton::TensorDescType descType,
                                   Attribute memorySpace = {}) {
-  return UnrankedMemRefType::get(
-      descType.getSignlessBlockType().getElementType(), memorySpace);
+  (void)context;
+  (void)memorySpace;
+  return triton::PointerType::get(
+      descType.getSignlessBlockType().getElementType(), /*addressSpace=*/1);
 }
 
 static MemRefType getTensorDescViewType(MLIRContext *context,
@@ -369,6 +373,15 @@ static Descriptor unpackDescriptor(ValueRange values) {
   assert(values.size() == 3 &&
          "expected tensor descriptors to consist of memref, padding, and tf32 "
          "flag");
+  if (auto castOp = values[0].getDefiningOp<UnrealizedConversionCastOp>()) {
+    if (castOp.getInputs().size() == values.size() &&
+        castOp.getOutputs().size() == values.size() &&
+        castOp.getInputs()[0].getDefiningOp<tts::MakeTensorPtrOp>() &&
+        llvm::equal(values, castOp.getOutputs())) {
+      return {castOp.getInputs()[0], castOp.getInputs()[1],
+              castOp.getInputs()[2]};
+    }
+  }
   return {values[0], values[1], values[2]};
 }
 
@@ -399,9 +412,51 @@ createDescriptorMemRef(OpBuilder &builder, Location loc, Value source,
                                            zero, sizes, mixedStrides);
 }
 
+static memref::ReinterpretCastOp
+createDescriptorMemRef(OpBuilder &builder, Location loc,
+                       tts::MakeTensorPtrOp desc,
+                       triton::TensorDescType descType) {
+  Value source = desc.getBase();
+  auto ptrType = cast<triton::PointerType>(source.getType());
+  auto fallbackType =
+      UnrankedMemRefType::get(ptrType.getPointeeType(), /*memorySpace=*/0);
+  source =
+      UnrealizedConversionCastOp::create(builder, loc, fallbackType, source)
+          .getResult(0);
+
+  auto rankedSourceType =
+      MemRefType::get({ShapedType::kDynamic},
+                      descType.getSignlessBlockType().getElementType());
+  source = memref::CastOp::create(builder, loc, rankedSourceType, source);
+
+  auto resultType =
+      cast<MemRefType>(getTensorDescViewType(builder.getContext(), descType));
+  Value zero = arith::ConstantIndexOp::create(builder, loc, 0);
+  return memref::ReinterpretCastOp::create(builder, loc, resultType, source,
+                                           zero, desc.getMixedShape(),
+                                           desc.getMixedStrides());
+}
+
 static Value getDescriptorMemRefView(OpBuilder &builder, Location loc,
                                      Value desc,
                                      triton::TensorDescType descType) {
+  if (auto castOp = desc.getDefiningOp<UnrealizedConversionCastOp>()) {
+    if (castOp.getInputs().size() == 1 &&
+        castOp.getInputs()[0]
+            .getDefiningOp<tts::MakeTensorPtrOp>()) {
+      desc = castOp.getInputs()[0];
+    }
+  }
+  if (auto tensorPtr = desc.getDefiningOp<tts::MakeTensorPtrOp>())
+    return createDescriptorMemRef(builder, loc, tensorPtr, descType);
+
+  if (!isa<BaseMemRefType>(desc.getType())) {
+    auto fallbackType =
+        UnrankedMemRefType::get(descType.getSignlessBlockType().getElementType(),
+                                /*memorySpace=*/0);
+    desc = UnrealizedConversionCastOp::create(builder, loc, fallbackType, desc)
+               .getResult(0);
+  }
   auto descMemRefType = cast<BaseMemRefType>(desc.getType());
   auto viewType = getTensorDescViewType(builder.getContext(), descType,
                                         descMemRefType.getMemorySpace());
@@ -410,11 +465,137 @@ static Value getDescriptorMemRefView(OpBuilder &builder, Location loc,
   return memref::CastOp::create(builder, loc, viewType, desc);
 }
 
+static tts::MakeTensorPtrOp getDescriptorTensorPtr(Value desc) {
+  if (auto ptr = desc.getDefiningOp<tts::MakeTensorPtrOp>())
+    return ptr;
+  if (auto castOp = desc.getDefiningOp<UnrealizedConversionCastOp>()) {
+    if (castOp.getInputs().size() == 1)
+      return castOp.getInputs()[0].getDefiningOp<tts::MakeTensorPtrOp>();
+  }
+  return nullptr;
+}
+
+static tts::MakeTensorPtrOp
+createDescriptorTensorPtr(OpBuilder &builder, Location loc, Value base,
+                          triton::TensorDescType descType, ValueRange shape,
+                          ValueRange strides, ValueRange offsets,
+                          ArrayRef<int64_t> staticShapeOverride = {}) {
+  SmallVector<OpFoldResult> mixedStrides;
+  for (Value stride : castToIndex(builder, loc, strides))
+    mixedStrides.push_back(stride);
+
+  SmallVector<OpFoldResult> mixedOffsets;
+  for (Value offset : castToIndex(builder, loc, offsets))
+    mixedOffsets.push_back(offset);
+
+  SmallVector<OpFoldResult> mixedShape;
+  if (!staticShapeOverride.empty()) {
+    for (int64_t dim : staticShapeOverride)
+      mixedShape.push_back(builder.getIndexAttr(dim));
+  } else {
+    for (Value dim : castToIndex(builder, loc, shape))
+      mixedShape.push_back(dim);
+  }
+
+  SmallVector<int32_t> order(descType.getShape().size());
+  for (auto [idx, value] : llvm::enumerate(order))
+    value = order.size() - idx - 1;
+
+  return tts::MakeTensorPtrOp::create(builder, loc, base, descType.getShape(),
+                                      mixedStrides, mixedOffsets, mixedShape,
+                                      order);
+}
+
+static tts::MakeTensorPtrOp
+createDescriptorAccessTensorPtr(OpBuilder &builder, Location loc,
+                                tts::MakeTensorPtrOp desc, ValueRange offsets) {
+  SmallVector<OpFoldResult> mixedOffsets;
+  for (Value offset : castToIndex(builder, loc, offsets))
+    mixedOffsets.push_back(offset);
+
+  SmallVector<OpFoldResult> noWrapShape(desc.getSizes().size(),
+                                        builder.getIndexAttr(0));
+  return tts::MakeTensorPtrOp::create(builder, loc, desc.getBase(),
+                                      desc.getSizes(), desc.getMixedStrides(),
+                                      mixedOffsets, noWrapShape,
+                                      desc.getOrder());
+}
+
+static Value createGatherScatterMask(OpBuilder &builder, Location loc,
+                                     Value offsets, OpFoldResult dimSize) {
+  auto offsetsType = cast<RankedTensorType>(offsets.getType());
+  auto offsetElementType = cast<IntegerType>(offsetsType.getElementType());
+  Value zero = arith::ConstantIntOp::create(builder, loc, 0,
+                                           offsetElementType.getWidth());
+  Value splatZero = triton::SplatOp::create(builder, loc, offsetsType, zero);
+  Value nonNegative = arith::CmpIOp::create(
+      builder, loc, arith::CmpIPredicate::sge, offsets, splatZero);
+
+  Value dim = getValueOrCreateConstantIndexOp(builder, loc, dimSize);
+  dim = arith::IndexCastOp::create(builder, loc, offsetElementType, dim);
+  Value splatDim = triton::SplatOp::create(builder, loc, offsetsType, dim);
+  Value inUpperBound = arith::CmpIOp::create(
+      builder, loc, arith::CmpIPredicate::slt, offsets, splatDim);
+
+  return arith::AndIOp::create(builder, loc, nonNegative, inUpperBound);
+}
+
+static SmallVector<OpFoldResult>
+getDescriptorGatherScatterMaskDims(OpBuilder &builder, Location loc,
+                                   ArrayRef<int64_t> tensorShape,
+                                   ArrayRef<OpFoldResult> descShape,
+                                   Value yOffset) {
+  assert(tensorShape.size() == 2 && descShape.size() == 2);
+  SmallVector<OpFoldResult> maskDims;
+  maskDims.push_back(builder.getIndexAttr(0));
+
+  Value dim1 = getValueOrCreateConstantIndexOp(builder, loc, descShape[1]);
+  Value y = castToIndex(builder, loc, yOffset);
+  Value zero = arith::ConstantIndexOp::create(builder, loc, 0);
+  Value expected =
+      arith::ConstantIndexOp::create(builder, loc, tensorShape[1]);
+  Value available = arith::SubIOp::create(builder, loc, dim1, y);
+  Value nonNegativeAvailable =
+      arith::MaxSIOp::create(builder, loc, available, zero);
+  Value tooSmall =
+      arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::slt,
+                            nonNegativeAvailable, expected);
+  Value clamped = arith::SelectOp::create(builder, loc, tooSmall,
+                                          nonNegativeAvailable, expected);
+  maskDims.push_back(clamped);
+  return maskDims;
+}
+
+static tts::MakeGatherScatterTensorPtrOp createDescriptorGatherScatterTensorPtr(
+    OpBuilder &builder, Location loc, tts::MakeTensorPtrOp desc,
+    Value xOffsets, Value yOffset, Value gatherScatterMask,
+    ArrayRef<int64_t> tensorShape) {
+  SmallVector<OpFoldResult> offsets;
+  offsets.push_back(builder.getIndexAttr(0));
+  offsets.push_back(castToIndex(builder, loc, yOffset));
+  if (gatherScatterMask) {
+    return tts::MakeGatherScatterTensorPtrOp::create(
+        builder, loc, desc.getBase(), xOffsets, gatherScatterMask,
+        /*gatherScatterDim=*/0, tensorShape, desc.getMixedStrides(), offsets);
+  }
+  return tts::MakeGatherScatterTensorPtrOp::create(
+      builder, loc, desc.getBase(), xOffsets,
+      /*gatherScatterDim=*/0, tensorShape, desc.getMixedStrides(), offsets);
+}
+
 struct BoundedTransferInfo {
   SmallVector<Value> sizes;
   Value needsPad;
   Value hasData;
 };
+
+static SmallVector<OpFoldResult> getAsOpFoldResults(ValueRange values) {
+  SmallVector<OpFoldResult> result;
+  result.reserve(values.size());
+  for (Value value : values)
+    result.push_back(value);
+  return result;
+}
 
 static BoundedTransferInfo getBoundedTransferInfo(Value desc,
                                                   ValueRange indices,
@@ -455,6 +636,44 @@ static BoundedTransferInfo getBoundedTransferInfo(Value desc,
   return info;
 }
 
+static BoundedTransferInfo getBoundedTransferInfoFromShape(
+    ArrayRef<OpFoldResult> shape, ValueRange indices,
+    ArrayRef<int64_t> blockShape, Location loc, OpBuilder &builder) {
+  BoundedTransferInfo info;
+  info.needsPad = nullptr;
+  info.hasData = nullptr;
+
+  for (auto [dim, staticSize] : llvm::enumerate(blockShape)) {
+    Value size = getValueOrCreateConstantIndexOp(builder, loc, shape[dim]);
+    Value index = castToIndex(builder, loc, indices[dim]);
+    Value expected = arith::ConstantIndexOp::create(builder, loc, staticSize);
+    Value zero = arith::ConstantIndexOp::create(builder, loc, 0);
+    Value available = arith::SubIOp::create(builder, loc, size, index);
+    Value nonNegativeAvailable =
+        arith::MaxSIOp::create(builder, loc, available, zero);
+    Value tooSmall =
+        arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::slt,
+                              nonNegativeAvailable, expected);
+    Value clamped = arith::SelectOp::create(builder, loc, tooSmall,
+                                            nonNegativeAvailable, expected);
+    info.sizes.push_back(clamped);
+
+    Value dimHasData = arith::CmpIOp::create(
+        builder, loc, arith::CmpIPredicate::sgt, clamped, zero);
+    if (!info.needsPad) {
+      info.needsPad = tooSmall;
+      info.hasData = dimHasData;
+    } else {
+      info.needsPad =
+          arith::OrIOp::create(builder, loc, info.needsPad, tooSmall);
+      info.hasData =
+          arith::AndIOp::create(builder, loc, info.hasData, dimHasData);
+    }
+  }
+
+  return info;
+}
+
 // Convert tt.make_tensor_descriptor to a descriptor payload.
 struct MakeTensorDescConverter
     : public OpConversionPattern<triton::MakeTensorDescOp> {
@@ -468,43 +687,21 @@ struct MakeTensorDescConverter
   matchAndRewrite(triton::MakeTensorDescOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
-    Value source = nullptr;
-    if (auto castOp =
-            op.getBase().getDefiningOp<UnrealizedConversionCastOp>()) {
-      if (castOp.getInputs().size() == 1 &&
-          isa<BaseMemRefType>(castOp.getInputs()[0].getType())) {
-        source = castOp.getInputs()[0];
-      }
-    } else if (isa<BaseMemRefType>(op.getBase().getType())) {
-      source = op.getBase();
-    }
-
-    if (!source) {
-      auto ptrType = cast<triton::PointerType>(op.getBase().getType());
-      auto fallbackType = UnrankedMemRefType::get(ptrType.getPointeeType(),
-                                                  /*memorySpace=*/0);
-      source = UnrealizedConversionCastOp::create(rewriter, loc, fallbackType,
-                                                  adaptor.getBase())
-                   .getResult(0);
-    }
-
-    Value memrefView =
-        createDescriptorMemRef(rewriter, loc, source, op.getType(),
-                               adaptor.getShape(), adaptor.getStrides());
-    Attribute memorySpace;
-    if (auto memrefType = dyn_cast<BaseMemRefType>(memrefView.getType()))
-      memorySpace = memrefType.getMemorySpace();
-    Value memref = memref::CastOp::create(
-        rewriter, loc,
-        convertTensorDescType(rewriter.getContext(), op.getType(), memorySpace),
-        memrefView);
+    SmallVector<Value> offsets(op.getType().getShape().size());
+    llvm::transform(offsets, offsets.begin(), [&](Value) {
+      return arith::ConstantIndexOp::create(rewriter, loc, 0);
+    });
+    Value tensorPtr =
+        createDescriptorTensorPtr(rewriter, loc, adaptor.getBase(),
+                                  op.getType(), adaptor.getShape(),
+                                  adaptor.getStrides(), offsets);
     Value paddingIsNan = arith::ConstantOp::create(
         rewriter, loc, rewriter.getI1Type(),
         rewriter.getBoolAttr(adaptor.getPadding() ==
                              triton::PaddingOption::PAD_NAN));
     Value roundF32ToTF32 = arith::ConstantOp::create(
         rewriter, loc, rewriter.getI1Type(), rewriter.getBoolAttr(false));
-    SmallVector<Value> replacement{memref, paddingIsNan, roundF32ToTF32};
+    SmallVector<Value> replacement{tensorPtr, paddingIsNan, roundF32ToTF32};
     rewriter.replaceOpWithMultiple(op, {replacement});
     return success();
   }
@@ -525,8 +722,6 @@ struct DescriptorLoadConverter
     auto loc = op.getLoc();
     auto descType = op.getDesc().getType();
     auto descPayload = unpackDescriptor(adaptor.getDesc());
-    auto desc =
-        getDescriptorMemRefView(rewriter, loc, descPayload.memref, descType);
     auto resultType = cast<RankedTensorType>(op.getType());
     auto blockShape = llvm::to_vector(descType.getShape());
 
@@ -536,6 +731,41 @@ struct DescriptorLoadConverter
               "the block shape");
     }
 
+    if (auto descPtr = getDescriptorTensorPtr(descPayload.memref)) {
+      auto indices = castToIndex(rewriter, loc, op.getIndices());
+      auto transferInfo = getBoundedTransferInfoFromShape(
+          descPtr.getMixedShape(), indices, blockShape, loc, rewriter);
+      auto accessPtr =
+          createDescriptorAccessTensorPtr(rewriter, loc, descPtr, indices);
+      auto padValue = getPadValue(rewriter, loc, resultType.getElementType(),
+                                  descPayload.paddingOption);
+      auto maskDims = getAsOpFoldResults(transferInfo.sizes);
+      Value tensor =
+          tts::LoadOp::create(rewriter, loc, accessPtr.getResult(), maskDims,
+                              padValue)
+              .getResult();
+      tensor = getRankReducingExtractSlice(tensor, resultType, blockShape, loc,
+                                           rewriter);
+
+      if (resultType.getElementType().isF32()) {
+        auto ifOp = scf::IfOp::create(rewriter, loc, resultType,
+                                      descPayload.roundF32ToTF32,
+                                      /*withElseRegion=*/true);
+        OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPointToStart(ifOp.thenBlock());
+        scf::YieldOp::create(rewriter, loc,
+                             roundF32ToTF32(rewriter, loc, tensor));
+        rewriter.setInsertionPointToStart(ifOp.elseBlock());
+        scf::YieldOp::create(rewriter, loc, tensor);
+        tensor = ifOp.getResult(0);
+      }
+
+      rewriter.replaceOp(op, tensor);
+      return success();
+    }
+
+    auto desc =
+        getDescriptorMemRefView(rewriter, loc, descPayload.memref, descType);
     auto indices = castToIndex(rewriter, loc, op.getIndices());
     auto transferInfo =
         getBoundedTransferInfo(desc, indices, blockShape, loc, rewriter);
@@ -611,8 +841,6 @@ struct DescriptorStoreConverter
     auto loc = op.getLoc();
     auto descType = op.getDesc().getType();
     auto descPayload = unpackDescriptor(adaptor.getDesc());
-    auto desc =
-        getDescriptorMemRefView(rewriter, loc, descPayload.memref, descType);
     auto srcType = cast<RankedTensorType>(op.getSrc().getType());
     auto blockShape = llvm::to_vector(descType.getShape());
 
@@ -622,6 +850,25 @@ struct DescriptorStoreConverter
               "the block shape");
     }
 
+    if (auto descPtr = getDescriptorTensorPtr(descPayload.memref)) {
+      auto indices = castToIndex(rewriter, loc, op.getIndices());
+      auto transferInfo = getBoundedTransferInfoFromShape(
+          descPtr.getMixedShape(), indices, blockShape, loc, rewriter);
+      auto accessPtr =
+          createDescriptorAccessTensorPtr(rewriter, loc, descPtr, indices);
+      auto fullSrcType =
+          RankedTensorType::get(blockShape, srcType.getElementType());
+      Value fullSrc = getRankExpandingValue(op.getSrc(), fullSrcType,
+                                            blockShape, loc, rewriter);
+      auto maskDims = getAsOpFoldResults(transferInfo.sizes);
+      tts::StoreOp::create(rewriter, loc, accessPtr.getResult(), fullSrc,
+                           maskDims);
+      rewriter.eraseOp(op);
+      return success();
+    }
+
+    auto desc =
+        getDescriptorMemRefView(rewriter, loc, descPayload.memref, descType);
     auto indices = castToIndex(rewriter, loc, op.getIndices());
     auto transferInfo =
         getBoundedTransferInfo(desc, indices, blockShape, loc, rewriter);
@@ -722,8 +969,6 @@ struct DescriptorGatherConverter
     auto loc = op.getLoc();
     auto descType = op.getDesc().getType();
     auto descPayload = unpackDescriptor(adaptor.getDesc());
-    auto desc =
-        getDescriptorMemRefView(rewriter, loc, descPayload.memref, descType);
     auto resultType = cast<RankedTensorType>(op.getResult().getType());
 
     if (resultType.getRank() != 2) {
@@ -731,6 +976,32 @@ struct DescriptorGatherConverter
           op, "descriptor gather currently expects rank-2 result");
     }
 
+    if (auto descPtr = getDescriptorTensorPtr(descPayload.memref)) {
+      Value gatherScatterMask = createGatherScatterMask(
+          rewriter, loc, op.getXOffsets(), descPtr.getMixedShape()[0]);
+      auto ptr = createDescriptorGatherScatterTensorPtr(
+          rewriter, loc, descPtr, op.getXOffsets(), op.getYOffset(),
+          gatherScatterMask, resultType.getShape());
+      auto padValue = getPadValue(rewriter, loc, resultType.getElementType(),
+                                  descPayload.paddingOption);
+      auto maskDims = getDescriptorGatherScatterMaskDims(
+          rewriter, loc, resultType.getShape(), descPtr.getMixedShape(),
+          op.getYOffset());
+      Value result =
+          tts::LoadOp::create(rewriter, loc, ptr.getResult(), maskDims,
+                              padValue)
+              .getResult();
+      if (resultType.getElementType().isF32()) {
+        Value rounded = roundF32ToTF32(rewriter, loc, result);
+        result = arith::SelectOp::create(
+            rewriter, loc, descPayload.roundF32ToTF32, rounded, result);
+      }
+      rewriter.replaceOp(op, result);
+      return success();
+    }
+
+    auto desc =
+        getDescriptorMemRefView(rewriter, loc, descPayload.memref, descType);
     auto emptyTensor =
         tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
                                 resultType.getElementType())
@@ -816,8 +1087,6 @@ struct DescriptorScatterConverter
     auto loc = op.getLoc();
     auto descType = op.getDesc().getType();
     auto descPayload = unpackDescriptor(adaptor.getDesc());
-    auto desc =
-        getDescriptorMemRefView(rewriter, loc, descPayload.memref, descType);
     auto srcType = cast<RankedTensorType>(op.getSrc().getType());
 
     if (srcType.getRank() != 2) {
@@ -825,6 +1094,23 @@ struct DescriptorScatterConverter
           op, "descriptor scatter currently expects rank-2 source");
     }
 
+    if (auto descPtr = getDescriptorTensorPtr(descPayload.memref)) {
+      Value gatherScatterMask = createGatherScatterMask(
+          rewriter, loc, op.getXOffsets(), descPtr.getMixedShape()[0]);
+      auto ptr = createDescriptorGatherScatterTensorPtr(
+          rewriter, loc, descPtr, op.getXOffsets(), op.getYOffset(),
+          gatherScatterMask, srcType.getShape());
+      auto maskDims = getDescriptorGatherScatterMaskDims(
+          rewriter, loc, srcType.getShape(), descPtr.getMixedShape(),
+          op.getYOffset());
+      tts::StoreOp::create(rewriter, loc, ptr.getResult(), op.getSrc(),
+                           maskDims);
+      rewriter.eraseOp(op);
+      return success();
+    }
+
+    auto desc =
+        getDescriptorMemRefView(rewriter, loc, descPayload.memref, descType);
     AffineExpr d0 = rewriter.getAffineDimExpr(0);
     AffineExpr d1 = rewriter.getAffineDimExpr(1);
     SmallVector<AffineMap> affineMaps{
@@ -904,7 +1190,8 @@ public:
         arith::ArithDialect, math::MathDialect, affine::AffineDialect,
         bufferization::BufferizationDialect, scf::SCFDialect,
         tensor::TensorDialect, linalg::LinalgDialect, memref::MemRefDialect,
-        triton::TritonDialect, ptr::PtrDialect, tptr::TPtrDialect>();
+        triton::TritonDialect, ptr::PtrDialect, tptr::TPtrDialect,
+        tts::TritonStructuredDialect>();
   }
 
   void runOnOperation() override {
@@ -944,7 +1231,8 @@ public:
 
     target.addDynamicallyLegalOp<
         tensor::SplatOp, linalg::GenericOp, linalg::YieldOp, tensor::EmptyOp,
-        tensor::ExpandShapeOp, tensor::InsertSliceOp, arith::SelectOp>(
+        tensor::ExpandShapeOp, tensor::InsertSliceOp, arith::SelectOp,
+        triton::SplatOp>(
         [&](auto op) {
           return llvm::all_of(
               llvm::concat<Value>(op->getOperands(), op->getResults()),
@@ -954,7 +1242,8 @@ public:
     target.addLegalDialect<
         arith::ArithDialect, linalg::LinalgDialect, tensor::TensorDialect,
         affine::AffineDialect, bufferization::BufferizationDialect,
-        tptr::TPtrDialect, ptr::PtrDialect, memref::MemRefDialect>();
+        tptr::TPtrDialect, ptr::PtrDialect, memref::MemRefDialect,
+        tts::TritonStructuredDialect>();
     target.addLegalOp<UnrealizedConversionCastOp>();
 
     patterns.add<MakeTensorDescConverter, DescriptorLoadConverter,
@@ -982,7 +1271,16 @@ public:
 
     if (failed(applyPartialConversion(moduleOp, target, std::move(patterns)))) {
       signalPassFailure();
+      return;
     }
+
+    SmallVector<tts::MakeTensorPtrOp> deadTensorPtrs;
+    moduleOp.walk([&](tts::MakeTensorPtrOp op) {
+      if (op->use_empty())
+        deadTensorPtrs.push_back(op);
+    });
+    for (auto op : deadTensorPtrs)
+      op.erase();
   }
 };
 } // namespace
