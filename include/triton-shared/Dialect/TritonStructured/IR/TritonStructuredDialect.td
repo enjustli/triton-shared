@@ -374,6 +374,7 @@ def TTS_ReduceOp : TTS_Op<"reduce", [
   }];
 
   let arguments = (ins TT_DescriptorReduceKindAttr:$kind,
+                       DefaultValuedAttr<BoolAttr, "false">:$is_unsigned,
                        TT_PtrLike:$ptr,
                        TT_Tensor:$value,
                        Variadic<Index>:$mask_dims,
@@ -382,6 +383,7 @@ def TTS_ReduceOp : TTS_Op<"reduce", [
   let builders = [
     OpBuilder<(ins
       "::mlir::triton::DescriptorReduceKind":$kind,
+      "bool":$is_unsigned,
       "Value":$ptr,
       "Value":$value,
       "ArrayRef<OpFoldResult>":$dims)>,

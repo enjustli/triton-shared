@@ -14,8 +14,16 @@ import re
 from pathlib import Path
 
 from triton.runtime.cache import get_cache_manager
-from triton.backends.driver import DriverBase, decompose_descriptor, expand_signature, wrap_handle_tensordesc_impl
+from triton.backends.driver import (
+    DriverBase,
+    decompose_descriptor,
+    expand_signature,
+    wrap_handle_tensordesc_impl,
+    _is_descriptor as _is_tensordesc,
+    _parse_descriptor as _parse_tensordesc,
+)
 from triton.backends.compiler import GPUTarget
+
 
 def _get_llvm_bin_path(bin_name: str) -> str:
     path = os.getenv("LLVM_BINARY_DIR", "")
@@ -43,6 +51,18 @@ def _sanitizer_available(sanitizer_type):
     return True
 
 # -------------------- Launcher ----------------------------
+def _tensordesc_base_ty(dtype, ndim):
+    return f"tensordesc_base<{dtype},{ndim}>"
+
+def _is_tensordesc_base(ty):
+    return isinstance(ty, str) and ty.startswith("tensordesc_base<")
+
+def _parse_tensordesc_base(ty):
+    match = re.match(r"tensordesc_base<([^,]+),(\d+)>", ty)
+    if not match:
+        raise AssertionError(f"Malformed tensor descriptor base type: {ty}")
+    return match.group(1), int(match.group(2))
+
 def _ty_to_cpp(ty):
     if isinstance(ty, str) and ty.startswith("tensordesc_base<"):
         return "void*"
@@ -118,76 +138,54 @@ def _format_of(ty):
       "uint64_t": "K",
     }[_ty_to_cpp(ty)]
 
-def _is_tensordesc(ty):
-    return isinstance(ty, str) and ty.startswith("tensordesc")
-
-def _parse_tensordesc(descriptor):
-    match = re.match(r"tensordesc(?:_im2col)?<([^[>]*)\[([^\]]*)\]", descriptor)
-    if not match:
-        raise AssertionError(f"Malformed tensor descriptor type: {descriptor}")
-    block_shape = match.group(2)
-    block_ndim = block_shape.count(",") + 1
-    rank_match = re.search(r",input_rank=(\d+)", descriptor)
-    ndim = int(rank_match.group(1)) if rank_match else block_ndim
-    return match.group(1), ndim
-
-def _tensordesc_base_ty(dtype, ndim):
-    return f"tensordesc_base<{dtype},{ndim}>"
-
-def _is_tensordesc_base(ty):
-    return isinstance(ty, str) and ty.startswith("tensordesc_base<")
-
-def _parse_tensordesc_base(ty):
-    match = re.match(r"tensordesc_base<([^,]+),(\d+)>", ty)
-    if not match:
-        raise AssertionError(f"Malformed tensor descriptor base type: {ty}")
-    return match.group(1), int(match.group(2))
-
 def _is_pointer_like(ty):
     return isinstance(ty, str) and (ty[0] == "*" or _is_tensordesc_base(ty))
 
-def _expand_tensordesc_signature(sig):
-    if isinstance(sig, tuple):
-        expanded = []
-        for x in sig:
-            value = _expand_tensordesc_signature(x)
-            if isinstance(value, tuple):
-                expanded.extend(value)
-            else:
-                expanded.append(value)
-        return tuple(expanded)
+def _mark_tensordesc_bases(sig, expanded):
     if _is_tensordesc(sig):
         dtype, ndim = _parse_tensordesc(sig)
-        return (_tensordesc_base_ty(dtype, ndim), *("i64" for _ in range(ndim)),
-                *("i64" for _ in range(ndim)), "i1", "i1", *("i32" for _ in range(ndim)),
-                *("i64" for _ in range(ndim)))
-    return sig
+        expanded = list(expanded)
+        expanded[0] = _tensordesc_base_ty(dtype, ndim)
+        return tuple(expanded)
+
+    if isinstance(sig, tuple):
+        result = []
+        cursor = 0
+        for elem in sig:
+            if _is_tensordesc(elem):
+                width = len(expand_signature((elem,), None, "tensordesc"))
+                result.extend(_mark_tensordesc_bases(elem, expanded[cursor:cursor + width]))
+                cursor += width
+            elif isinstance(elem, tuple):
+                result.append(_mark_tensordesc_bases(elem, expanded[cursor]))
+                cursor += 1
+            else:
+                result.append(expanded[cursor])
+                cursor += 1
+        return tuple(result)
+
+    return expanded
 
 def _expand_signature_dict(signature, constants):
     expanded_signature = {}
     expanded_constants = {}
     next_idx = 0
+    expanded_values = expand_signature(signature.values(), None, "tensordesc")
+    cursor = 0
 
     def expand_top_level(sig):
         if _is_tensordesc(sig):
-            return list(_expand_tensordesc_signature(sig))
+            width = len(expand_signature((sig,), None, "tensordesc"))
+            expanded = _mark_tensordesc_bases(sig, expanded_values[cursor:cursor + width])
+            return list(expanded), width
         if isinstance(sig, tuple):
-            return [expand_nested_tuple(sig)]
-        return [sig]
-
-    def expand_nested_tuple(sig):
-        expanded = []
-        for elem in sig:
-            if _is_tensordesc(elem):
-                expanded.extend(_expand_tensordesc_signature(elem))
-            elif isinstance(elem, tuple):
-                expanded.append(expand_nested_tuple(elem))
-            else:
-                expanded.append(elem)
-        return tuple(expanded)
+            return [_mark_tensordesc_bases(sig, expanded_values[cursor])], 1
+        return [expanded_values[cursor]], 1
 
     for idx, sig in signature.items():
-        for ty in expand_top_level(sig):
+        expanded, width = expand_top_level(sig)
+        cursor += width
+        for ty in expanded:
             expanded_signature[next_idx] = ty
             if idx in constants:
                 expanded_constants[next_idx] = constants[idx]
@@ -206,10 +204,7 @@ def _kernel_arg_decls(signature):
         if _is_tensordesc_base(ty):
             _, ndim = _parse_tensordesc_base(ty)
             decls.extend(["int64_t", "void*"])
-            decls.extend(["bool", "bool"])
-            decls.extend("int32_t" for _ in range(ndim))
-            decls.extend("int64_t" for _ in range(ndim))
-            i += 4 * ndim + 3
+            i += 1
             continue
         if ty[0] == "*":
             decls.extend(["int64_t", "void*"])
@@ -228,17 +223,8 @@ def _kernel_parameters(signature):
             i += 1
             continue
         if _is_tensordesc_base(ty):
-            _, ndim = _parse_tensordesc_base(ty)
-            padding_idx = items[i + 1 + 2 * ndim][0]
-            tf32_idx = items[i + 2 + 2 * ndim][0]
-            shape_idxs = [items[i + 3 + 2 * ndim + dim][0] for dim in range(ndim)]
-            stride_idxs = [items[i + 3 + 3 * ndim + dim][0] for dim in range(ndim)]
-            params.extend([str(ndim), f"&ptr_arg{idx}"])
-            params.extend([f"static_cast<bool>(arg{padding_idx})",
-                           f"static_cast<bool>(arg{tf32_idx})"])
-            params.extend(f"arg{shape_idx}" for shape_idx in shape_idxs)
-            params.extend(f"arg{stride_idx}" for stride_idx in stride_idxs)
-            i += 4 * ndim + 3
+            params.extend(["0", f"&ptr_arg{idx}"])
+            i += 1
             continue
         if ty[0] == "*":
             params.append(f"0, &ptr_arg{idx}")
@@ -267,7 +253,7 @@ def _pointer_arg_decls(signature, constants):
                 f"StridedMemRefType<{cpp_ty}, {ndim}> ptr_arg{idx} = "
                 f"{{static_cast<{cpp_ty} *>(arg{idx}), static_cast<{cpp_ty} *>(arg{idx}), 0, "
                 f"{{{shape_values}}}, {{{stride_values}}}}};")
-            i += 4 * ndim + 3
+            i += 1
             continue
         if _is_pointer_like(ty):
             decls.append(

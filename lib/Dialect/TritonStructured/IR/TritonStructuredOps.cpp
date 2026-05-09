@@ -341,15 +341,16 @@ void StoreOp::build(OpBuilder &b, OperationState &state, Value ptr, Value value,
 }
 
 void ReduceOp::build(OpBuilder &b, OperationState &state,
-                     triton::DescriptorReduceKind kind, Value ptr, Value value,
-                     ArrayRef<OpFoldResult> dims) {
+                     triton::DescriptorReduceKind kind, bool isUnsigned,
+                     Value ptr, Value value, ArrayRef<OpFoldResult> dims) {
   SmallVector<int64_t> staticDims;
   SmallVector<Value> dynamicDims;
 
   dispatchIndexOpFoldResults(dims, dynamicDims, staticDims);
 
   build(b, state, triton::DescriptorReduceKindAttr::get(b.getContext(), kind),
-        ptr, value, dynamicDims, b.getDenseI64ArrayAttr(staticDims));
+        b.getBoolAttr(isUnsigned), ptr, value, dynamicDims,
+        b.getDenseI64ArrayAttr(staticDims));
 }
 
 LogicalResult GetStructuredStateOp::verify() {

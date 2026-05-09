@@ -120,9 +120,20 @@ static OpFoldResult accumulateTargetOffset(Location loc,
   return targetOffset;
 }
 
+static bool hasUnsignedIntegerElement(Type type) {
+  if (auto ptrType = dyn_cast<triton::PointerType>(type))
+    return hasUnsignedIntegerElement(ptrType.getPointeeType());
+  if (auto shapedType = dyn_cast<ShapedType>(type))
+    return hasUnsignedIntegerElement(shapedType.getElementType());
+  if (auto intType = dyn_cast<IntegerType>(type))
+    return intType.isUnsigned();
+  return false;
+}
+
 static Value createReduceValue(OpBuilder &builder, Location loc,
                                triton::DescriptorReduceKind kind,
-                               Type elementType, Value current, Value update) {
+                               Type elementType, bool isUnsignedInteger,
+                               Value current, Value update) {
   bool isInteger = elementType.isIntOrIndex();
   bool isFloat = isa<FloatType>(elementType);
   switch (kind) {
@@ -133,10 +144,14 @@ static Value createReduceValue(OpBuilder &builder, Location loc,
   case triton::DescriptorReduceKind::MIN:
     if (isFloat)
       return arith::MinimumFOp::create(builder, loc, current, update);
+    if (isUnsignedInteger)
+      return arith::MinUIOp::create(builder, loc, current, update);
     return arith::MinSIOp::create(builder, loc, current, update);
   case triton::DescriptorReduceKind::MAX:
     if (isFloat)
       return arith::MaximumFOp::create(builder, loc, current, update);
+    if (isUnsignedInteger)
+      return arith::MaxUIOp::create(builder, loc, current, update);
     return arith::MaxSIOp::create(builder, loc, current, update);
   case triton::DescriptorReduceKind::AND:
     assert(isInteger && "tts.reduce and expects integer element type");
@@ -149,10 +164,10 @@ static Value createReduceValue(OpBuilder &builder, Location loc,
     return arith::XOrIOp::create(builder, loc, current, update);
   case triton::DescriptorReduceKind::INC: {
     assert(isInteger && "tts.reduce inc expects integer element type");
-    Value zero =
-        arith::ConstantOp::create(builder, loc, builder.getZeroAttr(elementType));
-    Value one =
-        arith::ConstantOp::create(builder, loc, builder.getOneAttr(elementType));
+    Value zero = arith::ConstantOp::create(builder, loc,
+                                           builder.getZeroAttr(elementType));
+    Value one = arith::ConstantOp::create(builder, loc,
+                                          builder.getOneAttr(elementType));
     Value currentIsZero = arith::CmpIOp::create(
         builder, loc, arith::CmpIPredicate::eq, current, zero);
     Value currentGreater = arith::CmpIOp::create(
@@ -165,10 +180,10 @@ static Value createReduceValue(OpBuilder &builder, Location loc,
   }
   case triton::DescriptorReduceKind::DEC: {
     assert(isInteger && "tts.reduce dec expects integer element type");
-    Value zero =
-        arith::ConstantOp::create(builder, loc, builder.getZeroAttr(elementType));
-    Value one =
-        arith::ConstantOp::create(builder, loc, builder.getOneAttr(elementType));
+    Value zero = arith::ConstantOp::create(builder, loc,
+                                           builder.getZeroAttr(elementType));
+    Value one = arith::ConstantOp::create(builder, loc,
+                                          builder.getOneAttr(elementType));
     Value currentIsZero = arith::CmpIOp::create(
         builder, loc, arith::CmpIPredicate::eq, current, zero);
     Value currentMinusOne = arith::SubIOp::create(builder, loc, current, one);
@@ -1230,6 +1245,8 @@ private:
     Value dst = ptr;
     Value src = value;
     auto srcType = cast<RankedTensorType>(value.getType());
+    bool isUnsignedInteger =
+        op.getIsUnsigned() || hasUnsignedIntegerElement(op.getPtr().getType());
     int rank = srcType.getRank();
 
     if (op.hasMask()) {
@@ -1247,8 +1264,8 @@ private:
       if (ShapedType::isDynamic(size))
         dynamicSizes.push_back(memref::DimOp::create(rewriter, loc, dst, dim));
     }
-    auto partialAlloc = memref::AllocOp::create(rewriter, loc,
-                                                partialAllocType, dynamicSizes);
+    auto partialAlloc =
+        memref::AllocOp::create(rewriter, loc, partialAllocType, dynamicSizes);
     memref::CopyOp::create(rewriter, loc, dst, partialAlloc);
 
     Value partialTensor =
@@ -1258,9 +1275,9 @@ private:
         rewriter, loc, ValueRange{src}, ValueRange{partialTensor},
         ArrayRef<int64_t>{},
         [&](OpBuilder &b, Location nestedLoc, ValueRange args) {
-          Value reduced =
-              createReduceValue(b, nestedLoc, op.getKind(),
-                                srcType.getElementType(), args[1], args[0]);
+          Value reduced = createReduceValue(
+              b, nestedLoc, op.getKind(), srcType.getElementType(),
+              isUnsignedInteger, args[1], args[0]);
           linalg::YieldOp::create(b, nestedLoc, reduced);
         });
     auto storeOp = bufferization::MaterializeInDestinationOp::create(
