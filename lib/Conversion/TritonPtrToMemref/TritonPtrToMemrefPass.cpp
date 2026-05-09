@@ -28,6 +28,7 @@
 #include "triton-shared/Dialect/TritonStructured/IR/TritonStructuredDialect.h"
 
 #include "triton/Dialect/Triton/IR/Dialect.h"
+#include "triton/Dialect/Triton/Transforms/FunctionTypeConversion.h"
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "triton/Dialect/Triton/IR/Types.h"
@@ -41,6 +42,25 @@ using namespace triton;
 #include "triton-shared/Conversion/TritonPtrToMemref/Passes.h.inc"
 
 namespace {
+
+SmallVector<Value> flattenValues(ArrayRef<ValueRange> values) {
+  SmallVector<Value> ret;
+  for (ValueRange valueRange : values)
+    llvm::append_range(ret, valueRange);
+  return ret;
+}
+
+struct FuncReturnOpConversion : public OpConversionPattern<func::ReturnOp> {
+  using OpConversionPattern<func::ReturnOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(func::ReturnOp returnOp, OneToNOpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOpWithNewOp<func::ReturnOp>(
+        returnOp, flattenValues(adaptor.getOperands()));
+    return success();
+  }
+};
 
 class TritonFunctionSignatureConverter : public TypeConverter {
 public:
@@ -97,12 +117,23 @@ public:
       return typeConverter.isLegal(op.getResultTypes()) &&
              typeConverter.isLegal(op.getOperandTypes());
     });
+    target.addDynamicallyLegalOp<triton::CallOp>([&](triton::CallOp op) {
+      return typeConverter.isLegal(op.getResultTypes()) &&
+             typeConverter.isLegal(op.getOperandTypes());
+    });
+    target.addDynamicallyLegalOp<func::ReturnOp>([&](func::ReturnOp op) {
+      return typeConverter.isLegal(op->getOperandTypes());
+    });
+    target.addDynamicallyLegalOp<triton::ReturnOp>([&](triton::ReturnOp op) {
+      return typeConverter.isLegal(op->getOperandTypes());
+    });
 
     populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(
         patterns, typeConverter);
-    populateFunctionOpInterfaceTypeConversionPattern<triton::FuncOp>(
-        patterns, typeConverter);
     populateCallOpTypeConversionPattern(patterns, typeConverter);
+    triton::FuncArgRenamer renamer(".");
+    triton::populateFunctionTypeConversions(typeConverter, renamer, patterns);
+    patterns.add<FuncReturnOpConversion>(typeConverter, patterns.getContext());
 
     if (failed(applyPartialConversion(moduleOp, target, std::move(patterns)))) {
       signalPassFailure();

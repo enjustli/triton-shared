@@ -71,12 +71,12 @@ def _ty_to_cpp(ty):
     if ty == "constexpr":
         return "PyObject*"
     return {
-        "i1": "int32_t",
+        "i1": "int8_t",
         "i8": "int8_t",
         "i16": "int16_t",
         "i32": "int32_t",
         "i64": "int64_t",
-        "u1": "uint32_t",
+        "u1": "uint8_t",
         "u8": "uint8_t",
         "u16": "uint16_t",
         "u32": "uint32_t",
@@ -223,13 +223,15 @@ def _kernel_parameters(signature):
             i += 1
             continue
         if _is_tensordesc_base(ty):
-            params.extend(["0", f"&ptr_arg{idx}"])
+            _, ndim = _parse_tensordesc_base(ty)
+            params.extend([str(ndim), f"&ptr_arg{idx}"])
             i += 1
             continue
         if ty[0] == "*":
             params.append(f"0, &ptr_arg{idx}")
         else:
-            params.append(f"static_cast<{_ty_to_cpp(ty)}>(arg{idx})")
+            cpp_ty = _ty_to_cpp(ty)
+            params.append(f"static_cast<{cpp_ty}>(arg{idx})")
         i += 1
     return ', '.join(params)
 
