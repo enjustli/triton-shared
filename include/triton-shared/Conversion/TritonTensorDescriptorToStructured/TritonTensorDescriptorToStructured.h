@@ -5,8 +5,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef TRITON_CONVERSION_TRITON_TENSOR_DESCRIPTOR_TO_MEMREF_H
-#define TRITON_CONVERSION_TRITON_TENSOR_DESCRIPTOR_TO_MEMREF_H
+#ifndef TRITON_CONVERSION_TRITON_TENSOR_DESCRIPTOR_TO_STRUCTURED_H
+#define TRITON_CONVERSION_TRITON_TENSOR_DESCRIPTOR_TO_STRUCTURED_H
 
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
@@ -15,9 +15,9 @@ namespace mlir {
 namespace triton {
 
 std::unique_ptr<OperationPass<ModuleOp>>
-createTritonTensorDescriptorToMemrefPass();
+createTritonTensorDescriptorToStructuredPass();
 
 } // namespace triton
 } // namespace mlir
 
-#endif // TRITON_CONVERSION_TRITON_TENSOR_DESCRIPTOR_TO_MEMREF_H
+#endif // TRITON_CONVERSION_TRITON_TENSOR_DESCRIPTOR_TO_STRUCTURED_H

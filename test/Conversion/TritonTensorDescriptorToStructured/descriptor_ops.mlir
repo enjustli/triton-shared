@@ -1,4 +1,4 @@
-// RUN: triton-shared-opt --triton-tensor-descriptor-to-memref --canonicalize --cse %s | FileCheck %s
+// RUN: triton-shared-opt --triton-tensor-descriptor-to-structured --canonicalize --cse %s | FileCheck %s
 
 module {
   tt.func @descriptor_ops(%src_ptr: !tt.ptr<i32>, %dst_ptr: !tt.ptr<i32>,

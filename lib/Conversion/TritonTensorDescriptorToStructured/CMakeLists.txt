@@ -1,8 +1,8 @@
-add_triton_library(TritonTensorDescriptorToMemref
-  TritonTensorDescriptorToMemrefPass.cpp
+add_triton_library(TritonTensorDescriptorToStructured
+  TritonTensorDescriptorToStructuredPass.cpp
 
   DEPENDS
-  TritonTensorDescriptorToMemrefConversionPassIncGen
+  TritonTensorDescriptorToStructuredConversionPassIncGen
 
   LINK_LIBS PUBLIC
   MLIRArithDialect

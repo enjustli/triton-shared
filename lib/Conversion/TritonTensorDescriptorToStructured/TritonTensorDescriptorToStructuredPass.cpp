@@ -4,7 +4,7 @@
 // Licensed under the MIT license.
 //
 //===----------------------------------------------------------------------===//
-// This pass lowers Triton tensor descriptor ops to memref-based IR.
+// This pass lowers Triton tensor descriptor ops to Triton structured IR.
 //===----------------------------------------------------------------------===//
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -38,7 +38,7 @@
 
 #include "triton-shared/Analysis/OpFoldResultUtils.h"
 #include "triton-shared/AnalysisStructured/PtrAnalysis.h"
-#include "triton-shared/Conversion/TritonTensorDescriptorToMemref/TritonTensorDescriptorToMemref.h"
+#include "triton-shared/Conversion/TritonTensorDescriptorToStructured/TritonTensorDescriptorToStructured.h"
 #include "triton-shared/Dialect/TPtr/IR/TPtrDialect.h"
 #include "triton-shared/Dialect/TritonStructured/IR/TritonStructuredDialect.h"
 #include "triton-shared/Utils/Utils.h"
@@ -50,14 +50,14 @@
 
 #include "llvm/ADT/STLExtras.h"
 
-#define DEBUG_TYPE "triton-tensor-descriptor-to-memref"
+#define DEBUG_TYPE "triton-tensor-descriptor-to-structured"
 
 using namespace mlir;
 
 namespace {
 
-#define GEN_PASS_DEF_TRITONTENSORDESCRIPTORTOMEMREF
-#include "triton-shared/Conversion/TritonTensorDescriptorToMemref/Passes.h.inc"
+#define GEN_PASS_DEF_TRITONTENSORDESCRIPTORTOSTRUCTURED
+#include "triton-shared/Conversion/TritonTensorDescriptorToStructured/Passes.h.inc"
 
 static Value castToIndex(OpBuilder &builder, Value value) {
   if (value.getType().isIndex())
@@ -710,9 +710,9 @@ public:
   }
 };
 
-class TritonTensorDescriptorToMemrefPass
-    : public impl::TritonTensorDescriptorToMemrefBase<
-          TritonTensorDescriptorToMemrefPass> {
+class TritonTensorDescriptorToStructuredPass
+    : public impl::TritonTensorDescriptorToStructuredBase<
+          TritonTensorDescriptorToStructuredPass> {
 
 public:
   void getDependentDialects(DialectRegistry &registry) const override {
@@ -821,6 +821,6 @@ public:
 } // namespace
 
 std::unique_ptr<OperationPass<ModuleOp>>
-triton::createTritonTensorDescriptorToMemrefPass() {
-  return std::make_unique<TritonTensorDescriptorToMemrefPass>();
+triton::createTritonTensorDescriptorToStructuredPass() {
+  return std::make_unique<TritonTensorDescriptorToStructuredPass>();
 }

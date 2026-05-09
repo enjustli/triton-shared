@@ -9,7 +9,7 @@
 #include "triton-shared/Conversion/StructuredToMemref/StructuredToMemref.h"
 #include "triton-shared/Conversion/TritonArithToLinalg/TritonArithToLinalg.h"
 #include "triton-shared/Conversion/TritonPtrToMemref/TritonPtrToMemref.h"
-#include "triton-shared/Conversion/TritonTensorDescriptorToMemref/TritonTensorDescriptorToMemref.h"
+#include "triton-shared/Conversion/TritonTensorDescriptorToStructured/TritonTensorDescriptorToStructured.h"
 #include "triton-shared/Conversion/TritonToLinalgExperimental/CollapseShape.h"
 #include "triton-shared/Conversion/TritonToLinalgExperimental/ReconcilePtrCasts.h"
 #include "triton-shared/Conversion/TritonToLinalgExperimental/TritonToLinalgExperimental.h"
@@ -56,7 +56,7 @@ public:
     auto moduleOp = getOperation();
     PassManager pm(&getContext(), moduleOp.getOperationName());
 
-    pm.addPass(createTritonTensorDescriptorToMemrefPass());
+    pm.addPass(createTritonTensorDescriptorToStructuredPass());
     pm.addPass(createTritonToStructuredPass(enableMakeGatherScatterTensorPtr));
 
     // Erase dead code and fold constants created during lowering
