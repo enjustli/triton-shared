@@ -6,6 +6,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -14,18 +15,16 @@
 #include "mlir/IR/TypeRange.h"
 #include "mlir/IR/Types.h"
 #include "mlir/IR/ValueRange.h"
+#include "mlir/Pass/PassManager.h"
 #include "mlir/Support/LogicalResult.h"
+#include "mlir/Transforms/Passes.h"
 #include "triton-shared/Analysis/OpFoldResultUtils.h"
+
 #include "triton-shared/AnalysisStructured/PtrAnalysis.h"
 #include "triton-shared/Conversion/TritonToStructured/TritonToStructured.h"
 #include "triton-shared/Dialect/TritonStructured/IR/TritonStructuredDialect.h"
 
 #include "triton/Dialect/Triton/IR/Dialect.h"
-#include "triton/Dialect/Triton/Transforms/ArithTypeConversion.h"
-
-#include "mlir/Dialect/Affine/IR/AffineOps.h"
-#include "mlir/Pass/PassManager.h"
-#include "mlir/Transforms/Passes.h"
 #include "triton/Dialect/Triton/IR/Types.h"
 
 #include "llvm/ADT/STLExtras.h"
@@ -156,7 +155,6 @@ public:
     ConversionTarget target(getContext());
     scf::populateSCFStructuralTypeConversionsAndLegality(converter, patterns,
                                                          target);
-    triton::populateArithTypeConversions(converter, patterns);
 
     if (failed(applyPartialConversion(getOperation(), target,
                                       std::move(patterns)))) {
@@ -213,27 +211,25 @@ public:
     // The return values for this op will be used as the init-args for scf.for.
     // At the end of pointer analysis, we will use the PtrState to create the
     // correct offsets, strides, and remove these ops.
-    converter.addTargetMaterialization([](OpBuilder &builder,
-                                          TypeRange resultTypes,
-                                          ValueRange inputs,
-                                          Location loc) -> SmallVector<Value> {
-      auto castOp =
-          inputs.front().getDefiningOp<UnrealizedConversionCastOp>();
-      if (!castOp || castOp->getNumOperands() != 1)
-        return SmallVector<Value>{};
+    converter.addTargetMaterialization(
+        [](OpBuilder &builder, TypeRange resultTypes, ValueRange inputs,
+           Location loc) -> SmallVector<Value> {
+          auto castOp =
+              inputs.front().getDefiningOp<UnrealizedConversionCastOp>();
+          if (!castOp || castOp->getNumOperands() != 1)
+            return SmallVector<Value>{};
 
-      auto placeholder = tts::GetStructuredStateOp::create(
-          builder, loc, castOp->getOperand(0));
-      assert(llvm::equal(placeholder.getResultTypes(), resultTypes));
-      SmallVector<Value> results;
-      llvm::append_range(results, placeholder.getResults());
-      return results;
-    });
+          auto placeholder = tts::GetStructuredStateOp::create(
+              builder, loc, castOp->getOperand(0));
+          assert(llvm::equal(placeholder.getResultTypes(), resultTypes));
+          SmallVector<Value> results;
+          llvm::append_range(results, placeholder.getResults());
+          return results;
+        });
 
     RewritePatternSet patterns(&getContext());
     scf::populateSCFStructuralTypeConversionsAndLegality(converter, patterns,
                                                          target);
-    triton::populateArithTypeConversions(converter, patterns);
     if (failed(applyPartialConversion(getOperation(), target,
                                       std::move(patterns)))) {
       return failure();
