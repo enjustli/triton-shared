@@ -21,6 +21,7 @@
 #include "triton-shared/Dialect/TritonStructured/IR/TritonStructuredDialect.h"
 
 #include "triton/Dialect/Triton/IR/Dialect.h"
+#include "triton/Dialect/Triton/Transforms/ArithTypeConversion.h"
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Pass/PassManager.h"
@@ -155,6 +156,7 @@ public:
     ConversionTarget target(getContext());
     scf::populateSCFStructuralTypeConversionsAndLegality(converter, patterns,
                                                          target);
+    triton::populateArithTypeConversions(converter, patterns);
 
     if (failed(applyPartialConversion(getOperation(), target,
                                       std::move(patterns)))) {
@@ -213,16 +215,25 @@ public:
     // correct offsets, strides, and remove these ops.
     converter.addTargetMaterialization([](OpBuilder &builder,
                                           TypeRange resultTypes,
-                                          ValueRange inputs, Location loc) {
+                                          ValueRange inputs,
+                                          Location loc) -> SmallVector<Value> {
+      auto castOp =
+          inputs.front().getDefiningOp<UnrealizedConversionCastOp>();
+      if (!castOp || castOp->getNumOperands() != 1)
+        return SmallVector<Value>{};
+
       auto placeholder = tts::GetStructuredStateOp::create(
-          builder, loc, inputs.front().getDefiningOp()->getOperand(0));
+          builder, loc, castOp->getOperand(0));
       assert(llvm::equal(placeholder.getResultTypes(), resultTypes));
-      return placeholder.getResults();
+      SmallVector<Value> results;
+      llvm::append_range(results, placeholder.getResults());
+      return results;
     });
 
     RewritePatternSet patterns(&getContext());
     scf::populateSCFStructuralTypeConversionsAndLegality(converter, patterns,
                                                          target);
+    triton::populateArithTypeConversions(converter, patterns);
     if (failed(applyPartialConversion(getOperation(), target,
                                       std::move(patterns)))) {
       return failure();

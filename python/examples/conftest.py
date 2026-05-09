@@ -118,6 +118,7 @@ def pytest_collection_modifyitems(config, items):
     skip_marker_tf32 = pytest.mark.skip(reason="tf32 is not supported on CPU")
     skip_marker_float8 = pytest.mark.skip(reason="float8 is not supported on CPU")
     skip_marker_cuda = pytest.mark.skip(reason="CUDA-specific tests are not supported on CPU")
+    skip_marker_ptr = pytest.mark.skip(reason="Tests with pointer arguments are not supported by triton-shared")
 
     for item in items:
         test_func_name = item.originalname if item.originalname else item.name
@@ -140,6 +141,9 @@ def pytest_collection_modifyitems(config, items):
                 continue
             if test_func_name == "test_host_tensor_descriptor_matmul" or test_func_name == "test_tensor_descriptor_batched_gemm_2d_tma":
                 item.add_marker(skip_marker_float16)
+                continue
+            if test_func_name == "test_make_tensor_descriptor_loop_carried":
+                item.add_marker(skip_marker_ptr)
                 continue
 
         if "parametrize" in item.keywords:

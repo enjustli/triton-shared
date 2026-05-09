@@ -97,7 +97,7 @@ module {
 // CHECK-SAME: shape: [0, 0]
 // CHECK: "tts.reduce"(%[[REDUCE_TPTR]], {{.*}}) <{is_unsigned = true, kind = 1 : i32
 // CHECK-SAME: static_mask_dims = array<i64: -9223372036854775808, -9223372036854775808>
-// CHECK-SAME: }> : (tensor<2x4x!tt.ptr<i32>>, tensor<2x4xi32>) -> ()
+// CHECK-SAME: }> : (tensor<2x4x!tt.ptr<i32>>, tensor<2x4xi32>, index, index) -> ()
 // CHECK-NOT: tt.descriptor_reduce
 // CHECK: tt.return
 
@@ -149,3 +149,35 @@ module {
 // CHECK-SAME: -> (!tt.ptr<i32>, i64, i64, i64, i64, i1, i1)
 // CHECK: tt.return
 // CHECK-SAME: !tt.ptr<i32>, i64, i64, i64, i64, i1, i1
+
+// CHECK-LABEL: tt.func public @kernel(
+// CHECK: %[[SRC_DESC:.*]]:11 = tt.call @test_tensor_descriptor.tensor_descriptor_return_helper__Pfp32_i32_i32_c8_c32
+// CHECK-SAME: -> (!tt.ptr<f32>, i64, i64, i64, i64, i1, i1, i32, i32, i64, i64)
+// CHECK: %[[DST_DESC:.*]]:11 = tt.call @test_tensor_descriptor.tensor_descriptor_return_helper__Pfp32_i32_i32_c8_c32
+// CHECK-SAME: -> (!tt.ptr<f32>, i64, i64, i64, i64, i1, i1, i32, i32, i64, i64)
+// CHECK: %[[SRC_TPTR:.*]] = tts.make_tptr %[[SRC_DESC]]#0
+// CHECK-SAME: to sizes: [8, 32]
+// CHECK-SAME: strides:
+// CHECK-SAME: offsets:
+// CHECK-SAME: shape: [0, 0]
+// CHECK-SAME: : <f32> to tensor<8x32x!tt.ptr<f32>>
+// CHECK: %[[LOAD:.*]] = "tts.load"(%[[SRC_TPTR]]
+// CHECK-SAME: tensor<8x32x!tt.ptr<f32>>
+// CHECK: %[[ABS:.*]] = math.absf
+// CHECK: %[[DST_TPTR:.*]] = tts.make_tptr %[[DST_DESC]]#0
+// CHECK-SAME: to sizes: [8, 32]
+// CHECK: "tts.store"(%[[DST_TPTR]], %[[ABS]]
+// CHECK-NOT: tt.descriptor_load
+// CHECK-NOT: tt.descriptor_store
+// CHECK: tt.return
+
+// CHECK-LABEL: tt.func private @test_tensor_descriptor.tensor_descriptor_return_helper__Pfp32_i32_i32_c8_c32(
+// CHECK-SAME: %[[BASE:[^:]+]]: !tt.ptr<f32>, %[[M:[^:]+]]: i32, %[[N:[^:]+]]: i32
+// CHECK-SAME: -> (!tt.ptr<f32>, i64, i64, i64, i64, i1, i1, i32, i32, i64, i64)
+// CHECK: %[[FALSE:.*]] = arith.constant false
+// CHECK: %[[C1_I64:.*]] = arith.constant 1 : i64
+// CHECK: %[[N_I64:.*]] = arith.extsi %[[N]] : i32 to i64
+// CHECK: %[[M_I64:.*]] = arith.extsi %[[M]] : i32 to i64
+// CHECK-NOT: tt.make_tensor_descriptor
+// CHECK: tt.return %[[BASE]], %[[M_I64]], %[[N_I64]], %[[N_I64]], %[[C1_I64]], %[[FALSE]], %[[FALSE]], %[[M]], %[[N]], %[[N_I64]], %[[C1_I64]]
+// CHECK-SAME: !tt.ptr<f32>, i64, i64, i64, i64, i1, i1, i32, i32, i64, i64

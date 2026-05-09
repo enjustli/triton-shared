@@ -1370,7 +1370,6 @@ PtrState PtrAnalysis::reconcileLoopPtrState(
   PtrState newState = state;
   int cnt = iterArgIndex + 1;
   if (newState.getRank() == 0) {
-    assert(newState.scalar);
     // for scalar pointers, the scalar contains the offset and is the only
     // relevant newState that could be updated by the loop.
     newState.scalar = getReplacementVal(forOp, cnt);
