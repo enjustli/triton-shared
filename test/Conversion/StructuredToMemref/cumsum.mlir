@@ -1,4 +1,4 @@
-// RUN: triton-shared-opt --split-input-file --triton-arith-to-linalg %s | FileCheck %s
+// RUN: triton-shared-opt --split-input-file --triton-to-linalg-experimental %s | FileCheck %s
 
 // @triton.jit
 // def test_cumsum_op(
