@@ -57,13 +57,13 @@ module {
 // CHECK:           %[[TYPE_OFFSET_1:.*]] = ptr.type_offset i8 : i32
 // CHECK:           %[[MULI_1:.*]] = arith.muli %[[TYPE_OFFSET_1]], %[[CONSTANT_2]] : i32
 // CHECK:           %[[PTR_ADD_1:.*]] = ptr.ptr_add %[[PTR_ADD_0]], %[[MULI_1]] : !ptr.ptr<#ptr.generic_space>, i32
-// CHECK:           %[[PTRTOINT_0:.*]] = tptr.ptr_to_int %[[UNREALIZED_CONVERSION_CAST_0]] : <#ptr.generic_space> to i64
+// CHECK:           %[[PTRTOINT_0:.*]] = tptr.ptr_to_int %[[UNREALIZED_CONVERSION_CAST_0]] : !ptr.ptr<#ptr.generic_space> to i64
 // CHECK:           %[[TYPE_OFFSET_2:.*]] = ptr.type_offset i32 : i64
 // CHECK:           %[[MULI_2:.*]] = arith.muli %[[PTRTOINT_0]], %[[TYPE_OFFSET_2]] : i64
 // CHECK:           %[[PTR_ADD_2:.*]] = ptr.ptr_add %[[UNREALIZED_CONVERSION_CAST_0]], %[[MULI_2]] : !ptr.ptr<#ptr.generic_space>, i64
 // CHECK:           %[[MULI_3:.*]] = arith.muli %[[TYPE_OFFSET_0]], %[[CONSTANT_3]] : i32
 // CHECK:           %[[PTR_ADD_3:.*]] = ptr.ptr_add %[[PTR_ADD_2]], %[[MULI_3]] : !ptr.ptr<#ptr.generic_space>, i32
-// CHECK:           %[[PTRTOINT_1:.*]] = tptr.ptr_to_int %[[PTR_ADD_3]] : <#ptr.generic_space> to i64
+// CHECK:           %[[PTRTOINT_1:.*]] = tptr.ptr_to_int %[[PTR_ADD_3]] : !ptr.ptr<#ptr.generic_space> to i64
 // CHECK:           %[[REMSI_0:.*]] = arith.remsi %[[PTRTOINT_1]], %[[CONSTANT_4]] : i64
 // CHECK:           %[[PTR_ADD_4:.*]] = ptr.ptr_add %[[PTR_ADD_1]], %[[TYPE_OFFSET_0]] : !ptr.ptr<#ptr.generic_space>, i32
 // CHECK:           %[[MULI_4:.*]] = arith.muli %[[REMSI_0]], %[[TYPE_OFFSET_2]] : i64
@@ -86,7 +86,7 @@ module {
 // CHECK:           %[[LOAD_0:.*]] = memref.load %[[FROM_PTR_0]]{{\[}}%[[CONSTANT_0]]] : memref<1xi32, #ptr.generic_space>
 // CHECK:           %[[EXTSI_0:.*]] = arith.extsi %[[ARG2]] : i32 to i64
 // CHECK:           %[[ADDI_0:.*]] = arith.addi %[[REMSI_0]], %[[EXTSI_0]] : i64
-// CHECK:           %[[INTTOPTR_0:.*]] = tptr.int_to_ptr %[[ADDI_0]] : i64 to <#ptr.generic_space>
+// CHECK:           %[[INTTOPTR_0:.*]] = tptr.int_to_ptr %[[ADDI_0]] : i64 to !ptr.ptr<#ptr.generic_space>
 // CHECK:           %[[FROM_PTR_1:.*]] = tptr.from_ptr %[[INTTOPTR_0]] : <#ptr.generic_space> -> memref<1xi32, #ptr.generic_space>
 // CHECK:           memref.store %[[LOAD_0]], %[[FROM_PTR_1]]{{\[}}%[[CONSTANT_0]]] : memref<1xi32, #ptr.generic_space>
 // CHECK:           return

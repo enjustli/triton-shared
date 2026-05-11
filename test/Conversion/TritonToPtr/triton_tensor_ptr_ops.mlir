@@ -78,7 +78,7 @@ module {
 // CHECK:           %[[EMPTY_1:.*]] = tensor.empty() : tensor<16x!ptr.ptr<#ptr.generic_space>>
 // CHECK:           %[[GENERIC_4:.*]] = linalg.generic {indexing_maps = [#[[$ATTR_0]], #[[$ATTR_0]]], iterator_types = ["parallel"]} ins(%[[GENERIC_3]] : tensor<16xi64>) outs(%[[EMPTY_1]] : tensor<16x!ptr.ptr<#ptr.generic_space>>) {
 // CHECK:           ^bb0(%[[VAL_8:.*]]: i64, %[[VAL_9:.*]]: !ptr.ptr<#ptr.generic_space>):
-// CHECK:             %[[INTTOPTR_0:.*]] = tptr.int_to_ptr %[[VAL_8]] : i64 to <#ptr.generic_space>
+// CHECK:             %[[INTTOPTR_0:.*]] = tptr.int_to_ptr %[[VAL_8]] : i64 to !ptr.ptr<#ptr.generic_space>
 // CHECK:             linalg.yield %[[INTTOPTR_0]] : !ptr.ptr<#ptr.generic_space>
 // CHECK:           } -> tensor<16x!ptr.ptr<#ptr.generic_space>>
 // CHECK:           %[[GENERIC_5:.*]] = linalg.generic {indexing_maps = [#[[$ATTR_0]], #[[$ATTR_0]]], iterator_types = ["parallel"]} ins(%[[GENERIC_4]] : tensor<16x!ptr.ptr<#ptr.generic_space>>) outs(%[[EMPTY_0]] : tensor<16xi32>) {
@@ -97,7 +97,7 @@ module {
 // CHECK:           } -> tensor<16x!ptr.ptr<#ptr.generic_space>>
 // CHECK:           %[[GENERIC_7:.*]] = linalg.generic {indexing_maps = [#[[$ATTR_0]], #[[$ATTR_0]]], iterator_types = ["parallel"]} ins(%[[GENERIC_6]] : tensor<16x!ptr.ptr<#ptr.generic_space>>) outs(%[[EMPTY_2]] : tensor<16xi64>) {
 // CHECK:           ^bb0(%[[VAL_15:.*]]: !ptr.ptr<#ptr.generic_space>, %[[VAL_16:.*]]: i64):
-// CHECK:             %[[PTRTOINT_0:.*]] = tptr.ptr_to_int %[[VAL_15]] : <#ptr.generic_space> to i64
+// CHECK:             %[[PTRTOINT_0:.*]] = tptr.ptr_to_int %[[VAL_15]] : !ptr.ptr<#ptr.generic_space> to i64
 // CHECK:             linalg.yield %[[PTRTOINT_0]] : i64
 // CHECK:           } -> tensor<16xi64>
 // CHECK:           %[[GENERIC_8:.*]] = linalg.generic {indexing_maps = [#[[$ATTR_0]], #[[$ATTR_0]]], iterator_types = ["parallel"]} ins(%[[GENERIC_5]] : tensor<16xi32>) outs(%[[EMPTY_2]] : tensor<16xi64>) {
