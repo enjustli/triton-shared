@@ -724,6 +724,128 @@ struct MakeRangeConverter : public OpConversionPattern<triton::MakeRangeOp> {
   }
 };
 
+struct HistogramConverter : public OpConversionPattern<triton::HistogramOp> {
+  using OpConversionPattern<triton::HistogramOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(triton::HistogramOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    auto src = adaptor.getSrc();
+    auto mask = adaptor.getMask();
+    auto srcType = cast<RankedTensorType>(src.getType());
+    auto resultType = cast<RankedTensorType>(op.getResult().getType());
+
+    if (srcType.getRank() != 1 || resultType.getRank() != 1) {
+      return rewriter.notifyMatchFailure(
+          op, "histogram lowering only supports 1D tensors");
+    }
+
+    auto srcElementType = dyn_cast<IntegerType>(srcType.getElementType());
+    auto resultElementType =
+        dyn_cast<IntegerType>(resultType.getElementType());
+    if (!srcElementType || !resultElementType) {
+      return rewriter.notifyMatchFailure(
+          op, "histogram lowering only supports integer tensors");
+    }
+
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+    Value zeroCount =
+        arith::ConstantIntOp::create(rewriter, loc, resultElementType, 0);
+    Value oneCount =
+        arith::ConstantIntOp::create(rewriter, loc, resultElementType, 1);
+
+    Value numSrcElements =
+        srcType.isDynamicDim(0)
+            ? tensor::DimOp::create(rewriter, loc, src, 0).getResult()
+            : arith::ConstantIndexOp::create(rewriter, loc,
+                                             srcType.getDimSize(0))
+                  .getResult();
+    Value numBins =
+        resultType.isDynamicDim(0)
+            ? tensor::DimOp::create(rewriter, loc, op.getResult(), 0)
+                  .getResult()
+            : arith::ConstantIndexOp::create(rewriter, loc,
+                                             resultType.getDimSize(0))
+                  .getResult();
+
+    Value init = tensor::EmptyOp::create(rewriter, loc, resultType.getShape(),
+                                         resultElementType);
+    Value filled =
+        linalg::FillOp::create(rewriter, loc, ValueRange{zeroCount},
+                               ValueRange{init})
+            .result();
+
+    auto outerLoop = scf::ForOp::create(rewriter, loc, zero, numBins, one,
+                                        ValueRange{filled});
+    scf::YieldOp outerYield;
+    if (!outerLoop.getBody()->empty()) {
+      outerYield = dyn_cast<scf::YieldOp>(outerLoop.getBody()->back());
+    }
+    if (outerYield) {
+      rewriter.setInsertionPoint(outerYield);
+    } else {
+      rewriter.setInsertionPointToEnd(outerLoop.getBody());
+    }
+
+    Value bin = outerLoop.getInductionVar();
+    Value binValue =
+        arith::IndexCastOp::create(rewriter, loc, srcElementType, bin);
+
+    auto innerLoop = scf::ForOp::create(rewriter, loc, zero, numSrcElements,
+                                        one, ValueRange{zeroCount});
+    scf::YieldOp innerYield;
+    if (!innerLoop.getBody()->empty()) {
+      innerYield = dyn_cast<scf::YieldOp>(innerLoop.getBody()->back());
+    }
+    if (innerYield) {
+      rewriter.setInsertionPoint(innerYield);
+    } else {
+      rewriter.setInsertionPointToEnd(innerLoop.getBody());
+    }
+
+    Value srcIndex = innerLoop.getInductionVar();
+    Value srcValue = tensor::ExtractOp::create(rewriter, loc, src,
+                                               ValueRange{srcIndex});
+    Value isCurrentBin = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::eq, srcValue, binValue);
+    if (mask) {
+      Value maskValue = tensor::ExtractOp::create(rewriter, loc, mask,
+                                                  ValueRange{srcIndex});
+      isCurrentBin =
+          arith::AndIOp::create(rewriter, loc, isCurrentBin, maskValue);
+    }
+
+    Value currentCount = innerLoop.getRegionIterArgs().front();
+    Value incrementedCount =
+        arith::AddIOp::create(rewriter, loc, currentCount, oneCount);
+    Value nextCount = arith::SelectOp::create(rewriter, loc, isCurrentBin,
+                                              incrementedCount, currentCount);
+    scf::YieldOp::create(rewriter, loc, nextCount);
+    if (innerYield) {
+      rewriter.eraseOp(innerYield);
+    }
+
+    if (outerYield) {
+      rewriter.setInsertionPoint(outerYield);
+    } else {
+      rewriter.setInsertionPointToEnd(outerLoop.getBody());
+    }
+    Value binCount = innerLoop.getResult(0);
+    Value nextHistogram = tensor::InsertOp::create(
+        rewriter, loc, binCount, outerLoop.getRegionIterArgs().front(),
+        ValueRange{bin});
+    scf::YieldOp::create(rewriter, loc, nextHistogram);
+    if (outerYield) {
+      rewriter.eraseOp(outerYield);
+    }
+
+    rewriter.replaceOp(op, outerLoop.getResult(0));
+    return success();
+  }
+};
+
 struct AssertConverter : public OpConversionPattern<triton::AssertOp> {
   using OpConversionPattern<triton::AssertOp>::OpConversionPattern;
 
