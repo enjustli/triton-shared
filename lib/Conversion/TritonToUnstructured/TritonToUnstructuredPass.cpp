@@ -378,7 +378,8 @@ public:
                       b.create(op->getLoc(), op->getName().getIdentifier(),
                                ValueRange{offsetInfo.offset},
                                TypeRange{getPtrOffsetType(
-                                   resType, offsetInfo.bitWidth)});
+                                   resType, offsetInfo.bitWidth)},
+                               op->getAttrs());
 
                   PtrOffset newOffsetInfo{offsetInfo.ptr, resType,
                                           offsetInfo.bitWidth,
