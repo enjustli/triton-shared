@@ -22,6 +22,8 @@
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Linalg/Passes.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/ReshapeOpsUtils.h"
 
 #include "llvm/ADT/SmallVectorExtras.h"
@@ -1986,8 +1988,232 @@ struct DenseConstantConverter : public OpConversionPattern<arith::ConstantOp> {
   }
 };
 
-class CumSumConverter : public OpConversionPattern<triton::ScanOp> {
+class ScanConverter : public OpConversionPattern<triton::ScanOp> {
   using OpConversionPattern<triton::ScanOp>::OpConversionPattern;
+
+  SmallVector<OpFoldResult>
+  getScanSliceOffsets(ConversionPatternRewriter &rewriter,
+                      RankedTensorType type, int64_t axis,
+                      Value scanIndex) const {
+    SmallVector<OpFoldResult> offsets;
+    offsets.reserve(type.getRank());
+    for (int64_t dim = 0; dim < type.getRank(); ++dim) {
+      offsets.push_back(dim == axis ? OpFoldResult(scanIndex)
+                                    : OpFoldResult(rewriter.getIndexAttr(0)));
+    }
+    return offsets;
+  }
+
+  SmallVector<OpFoldResult>
+  getScanSliceSizes(ConversionPatternRewriter &rewriter, Location loc,
+                    Value source, RankedTensorType type, int64_t axis) const {
+    SmallVector<OpFoldResult> sizes;
+    sizes.reserve(type.getRank());
+    for (int64_t dim = 0; dim < type.getRank(); ++dim) {
+      if (dim == axis) {
+        sizes.push_back(rewriter.getIndexAttr(1));
+      } else if (type.isDynamicDim(dim)) {
+        sizes.push_back(
+            tensor::DimOp::create(rewriter, loc, source, dim).getResult());
+      } else {
+        sizes.push_back(rewriter.getIndexAttr(type.getDimSize(dim)));
+      }
+    }
+    return sizes;
+  }
+
+  SmallVector<OpFoldResult> getUnitStrides(ConversionPatternRewriter &rewriter,
+                                           int64_t rank) const {
+    return SmallVector<OpFoldResult>(rank, rewriter.getIndexAttr(1));
+  }
+
+  Value extractScanSlice(ConversionPatternRewriter &rewriter, Location loc,
+                         Value source, RankedTensorType type, int64_t axis,
+                         Value scanIndex) const {
+    return tensor::ExtractSliceOp::create(
+        rewriter, loc, source,
+        getScanSliceOffsets(rewriter, type, axis, scanIndex),
+        getScanSliceSizes(rewriter, loc, source, type, axis),
+        getUnitStrides(rewriter, type.getRank()));
+  }
+
+  Value insertScanSlice(ConversionPatternRewriter &rewriter, Location loc,
+                        Value slice, Value dest, RankedTensorType destType,
+                        int64_t axis, Value scanIndex) const {
+    return tensor::InsertSliceOp::create(
+        rewriter, loc, slice, dest,
+        getScanSliceOffsets(rewriter, destType, axis, scanIndex),
+        getScanSliceSizes(rewriter, loc, dest, destType, axis),
+        getUnitStrides(rewriter, destType.getRank()));
+  }
+
+  Value createScanIndex(ConversionPatternRewriter &rewriter, Location loc,
+                        Value axisSize, Value iter, bool reverse) const {
+    if (!reverse) {
+      return iter;
+    }
+    auto one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+    auto remaining = arith::SubIOp::create(rewriter, loc, axisSize, iter);
+    return arith::SubIOp::create(rewriter, loc, remaining, one);
+  }
+
+  Value createCombineSlice(triton::ScanOp op, ValueRange accumulators,
+                           ValueRange currents, RankedTensorType sliceType,
+                           ConversionPatternRewriter &rewriter) const {
+    auto loc = op.getLoc();
+    SmallVector<Value> inputs;
+    inputs.append(accumulators.begin(), accumulators.end());
+    inputs.append(currents.begin(), currents.end());
+
+    SmallVector<Value> outputs;
+    for (auto resultType : op.getResultTypes()) {
+      auto elementType = cast<RankedTensorType>(resultType).getElementType();
+      outputs.push_back(tensor::EmptyOp::create(
+          rewriter, loc, sliceType.getShape(), elementType));
+    }
+
+    SmallVector<AffineMap> indexingMaps(
+        inputs.size() + outputs.size(),
+        rewriter.getMultiDimIdentityMap(sliceType.getRank()));
+    SmallVector<utils::IteratorType> iteratorTypes =
+        getNParallelLoopsAttrs(sliceType.getRank());
+
+    auto outputTypes = llvm::map_to_vector(
+        outputs, [](Value output) -> Type { return output.getType(); });
+
+    auto genericOp = linalg::GenericOp::create(
+        rewriter, loc, outputTypes, inputs, outputs, indexingMaps,
+        iteratorTypes, [&](OpBuilder &b, Location loc, ValueRange regionArgs) {
+          Block *scanBlock = op.getBody();
+          IRMapping mapping;
+          mapping.map(scanBlock->getArguments(), regionArgs);
+
+          for (Operation &bodyOp : scanBlock->without_terminator()) {
+            b.clone(bodyOp, mapping);
+          }
+
+          auto results = llvm::map_to_vector(
+              scanBlock->getTerminator()->getOperands(),
+              [&](Value value) { return mapping.lookup(value); });
+          linalg::YieldOp::create(b, loc, results);
+        });
+    return genericOp.getResults().front();
+  }
+
+  LogicalResult convertScanToScfFor(triton::ScanOp op, OpAdaptor adaptor,
+                                    ConversionPatternRewriter &rewriter) const {
+    auto loc = op.getLoc();
+    auto sources = adaptor.getSrcs();
+    if (sources.empty()) {
+      return rewriter.notifyMatchFailure(
+          op, "Scan op must have at least one source");
+    }
+
+    auto sourceType = cast<RankedTensorType>(sources.front().getType());
+    int64_t rank = sourceType.getRank();
+    int64_t axis = op.getAxis();
+    if (axis < 0) {
+      axis += rank;
+    }
+    if (axis < 0 || axis >= rank) {
+      return rewriter.notifyMatchFailure(op, "Scan axis out of bounds");
+    }
+
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+    Value axisSize =
+        sourceType.isDynamicDim(axis)
+            ? tensor::DimOp::create(rewriter, loc, sources.front(), axis)
+                  .getResult()
+            : arith::ConstantIndexOp::create(rewriter, loc,
+                                             sourceType.getDimSize(axis))
+                  .getResult();
+
+    Value firstIndex =
+        createScanIndex(rewriter, loc, axisSize, zero, op.getReverse());
+
+    SmallVector<Value> firstAccumulators;
+    for (Value source : sources) {
+      auto type = cast<RankedTensorType>(source.getType());
+      firstAccumulators.push_back(
+          extractScanSlice(rewriter, loc, source, type, axis, firstIndex));
+    }
+
+    SmallVector<Value> outputs;
+    for (auto [resultType, accumulator] :
+         llvm::zip(op.getResultTypes(), firstAccumulators)) {
+      auto rankedType = cast<RankedTensorType>(resultType);
+      Value empty = tensor::EmptyOp::create(
+          rewriter, loc, rankedType.getShape(), rankedType.getElementType());
+      outputs.push_back(insertScanSlice(rewriter, loc, accumulator, empty,
+                                        rankedType, axis, firstIndex));
+    }
+
+    SmallVector<Value> initArgs;
+    initArgs.append(firstAccumulators.begin(), firstAccumulators.end());
+    initArgs.append(outputs.begin(), outputs.end());
+
+    auto loop = scf::ForOp::create(rewriter, loc, one, axisSize, one, initArgs);
+    scf::YieldOp oldYield;
+    if (!loop.getBody()->empty()) {
+      oldYield = dyn_cast<scf::YieldOp>(loop.getBody()->back());
+    }
+
+    if (oldYield) {
+      rewriter.setInsertionPoint(oldYield);
+    } else {
+      rewriter.setInsertionPointToEnd(loop.getBody());
+    }
+    Value scanIndex = createScanIndex(rewriter, loc, axisSize,
+                                      loop.getInductionVar(), op.getReverse());
+
+    auto regionIterArgs = loop.getRegionIterArgs();
+    SmallVector<Value> loopAccumulators;
+    SmallVector<Value> loopOutputs;
+    for (auto [index, iterArg] : llvm::enumerate(regionIterArgs)) {
+      if (index < sources.size()) {
+        loopAccumulators.push_back(iterArg);
+      } else {
+        loopOutputs.push_back(iterArg);
+      }
+    }
+
+    SmallVector<Value> currentSlices;
+    for (Value source : sources) {
+      auto type = cast<RankedTensorType>(source.getType());
+      currentSlices.push_back(
+          extractScanSlice(rewriter, loc, source, type, axis, scanIndex));
+    }
+
+    auto sliceType =
+        cast<RankedTensorType>(firstAccumulators.front().getType());
+    Value combined = createCombineSlice(op, loopAccumulators, currentSlices,
+                                        sliceType, rewriter);
+    auto genericOp = combined.getDefiningOp<linalg::GenericOp>();
+    SmallVector<Value> nextAccumulators(genericOp.getResults());
+
+    SmallVector<Value> nextOutputs;
+    for (auto [resultType, accumulator, output] :
+         llvm::zip(op.getResultTypes(), nextAccumulators, loopOutputs)) {
+      nextOutputs.push_back(insertScanSlice(rewriter, loc, accumulator, output,
+                                            cast<RankedTensorType>(resultType),
+                                            axis, scanIndex));
+    }
+
+    SmallVector<Value> yielded;
+    yielded.append(nextAccumulators.begin(), nextAccumulators.end());
+    yielded.append(nextOutputs.begin(), nextOutputs.end());
+    scf::YieldOp::create(rewriter, loc, yielded);
+    if (oldYield) {
+      rewriter.eraseOp(oldYield);
+    }
+
+    SmallVector<Value> replacements(
+        loop.getResults().drop_front(firstAccumulators.size()));
+    rewriter.replaceOp(op, replacements);
+
+    return success();
+  }
 
   // CumSum is a specific instance of Scan that looks like the following:
   //       %1 = "tt.scan"(%0) <{axis = 1 : i32}> ({
@@ -2024,15 +2250,8 @@ class CumSumConverter : public OpConversionPattern<triton::ScanOp> {
     return false;
   }
 
-public:
-  LogicalResult
-  matchAndRewrite(triton::ScanOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    if (!isCumSum(op)) {
-      return rewriter.notifyMatchFailure(
-          op, "Only support cumsum variant of scan op");
-    }
-
+  LogicalResult convertScanToCumSum(triton::ScanOp op, OpAdaptor adaptor,
+                                    ConversionPatternRewriter &rewriter) const {
     auto input = op.getOperand(0);
     auto axis = op.getAxis();
     auto type = dyn_cast<RankedTensorType>(input.getType());
@@ -2051,6 +2270,16 @@ public:
         op, input, rewriter.getUI32IntegerAttr(axis), init);
 
     return success();
+  }
+
+public:
+  LogicalResult
+  matchAndRewrite(triton::ScanOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    // if (isCumSum(op)) {
+    //   return convertScanToCumSum(op, adaptor, rewriter);
+    // }
+    return convertScanToScfFor(op, adaptor, rewriter);
   }
 };
 
