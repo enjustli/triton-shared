@@ -1084,6 +1084,10 @@ struct MatmulConverter : public OpConversionPattern<triton::DotOp> {
     auto opc = op.getC();
 
     auto dstType = cast<RankedTensorType>(op.getType());
+    if (dstType.getRank() != 2 && dstType.getRank() != 3)
+      return rewriter.notifyMatchFailure(
+          op, "only rank 2 and rank 3 dot operands are supported");
+
     auto elementType = dstType.getElementType();
     bool integers = elementType.isInteger();
     bool skipC = isZeroTensor(opc, integers);
@@ -1101,9 +1105,16 @@ struct MatmulConverter : public OpConversionPattern<triton::DotOp> {
                                          ValueRange{init})
                       .result();
 
-    auto res = linalg::MatmulOp::create(rewriter, loc, ValueRange{opa, opb},
-                                        ValueRange{zeroes})
-                   .getResult(0);
+    Value res;
+    if (dstType.getRank() == 2) {
+      res = linalg::MatmulOp::create(rewriter, loc, ValueRange{opa, opb},
+                                     ValueRange{zeroes})
+                .getResult(0);
+    } else {
+      res = linalg::BatchMatmulOp::create(rewriter, loc, ValueRange{opa, opb},
+                                          ValueRange{zeroes})
+                .getResult(0);
+    }
 
     if (!skipC) {
       if (integers) {
